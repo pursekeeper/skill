@@ -5,7 +5,8 @@
 //   NANO_SEED=<64 hex> node client-x402.js [url]      (default: pursekeeper.dev/v1/echo?msg=hello)
 //
 // Env: NANO_SEED (required), NANO_INDEX (account index, default 0),
-//      NANO_RPC (node RPC for account_info, default http://127.0.0.1:7076),
+//      NANO_RPC (optional node RPC override for account_info),
+//      API (no-node account-info service, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint),
 //      METHOD and BODY (optional, e.g. METHOD=POST BODY='{"hash":"..."}' to buy a work
 //      from POST /v1/work; the same method and body are used for the 402 probe and the paid call).
@@ -21,10 +22,21 @@
 const N = require('nanocurrency');
 
 const url = process.argv[2] || 'https://pursekeeper.dev/v1/echo?msg=hello';
-const RPC = process.env.NANO_RPC || 'http://127.0.0.1:7076';
+const RPC = process.env.NANO_RPC;
+const API = (process.env.API || 'https://pursekeeper.dev').replace(/\/$/, '');
 const b64 = s => Buffer.from(JSON.stringify(s)).toString('base64');
 const unb64 = s => JSON.parse(Buffer.from(s, 'base64').toString('utf8'));
 const rpc = (u, body) => fetch(u, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }).then(r => r.json());
+
+async function accountInfo(account) {
+  if (RPC) return rpc(RPC, { action: 'account_info', account, representative: 'true' });
+  const r = await fetch(API + '/v1/account_info?account=' + encodeURIComponent(account));
+  if (!r.ok) throw new Error('account_info HTTP ' + r.status);
+  const info = await r.json();
+  if (info.error) return info;
+  if (!info.found) return { error: 'account has no blocks; receive first' };
+  return { ...info, balance: info.balance_raw };
+}
 
 async function work(hash, origin) {
   if (process.env.WORK_URL) {
@@ -58,7 +70,7 @@ async function work(hash, origin) {
   if (!accepted) throw new Error('seller does not accept exact on nano:mainnet: ' + JSON.stringify(pr.accepts));
   console.error(`seller wants ${accepted.amount} raw (${Number(accepted.amount) / 1e30} NANO) to ${accepted.payTo}`);
 
-  const info = await rpc(RPC, { action: 'account_info', account, representative: 'true' });
+  const info = await accountInfo(account);
   if (info.error) throw new Error('account_info: ' + info.error + ' (is the account opened and funded?)');
   const balance = BigInt(info.balance) - BigInt(accepted.amount);
   if (balance < 0n) throw new Error(`insufficient balance: have ${info.balance} raw`);
