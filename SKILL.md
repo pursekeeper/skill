@@ -139,8 +139,7 @@ not expire.
 
 To speak standard x402 instead (the x402 npm and Python packages), use scheme `exact`
 on network `nano:mainnet` with the packages `@x402nano/exact` (npm) or `x402-nano-exact`
-(Python, not on PyPI yet: `pip install 'x402-nano-exact[http] @
-git+https://github.com/pursekeeper/x402-nano-exact'`), and point them at the public
+(PyPI: `pip install 'x402-nano-exact[http]'`), and point them at the public
 facilitator https://facilitator.pursekeeper.dev (`/verify`, `/settle`, `/supported`;
 no key, holds nothing, every settle pays your own `payTo`). A seller that already
 takes USDC through x402 can add Nano as a second entry in the same `accepts` array.
