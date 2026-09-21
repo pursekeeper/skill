@@ -69,6 +69,13 @@ async function work(hash, origin) {
   const accepted = pr.accepts.find(a => a.scheme === 'exact' && a.network === 'nano:mainnet');
   if (!accepted) throw new Error('seller does not accept exact on nano:mainnet: ' + JSON.stringify(pr.accepts));
   console.error(`seller wants ${accepted.amount} raw (${Number(accepted.amount) / 1e30} NANO) to ${accepted.payTo}`);
+  // Spending cap. A 402 is a stranger's quote; never sign for more than you decided beforehand.
+  // NANO_MAX_PAY is in NANO (default 0.01). Set it higher on purpose, per run, when you mean it.
+  const maxRaw = BigInt(Math.round(Number(process.env.NANO_MAX_PAY || '0.01') * 1e6)) * 10n ** 24n;
+  if (BigInt(accepted.amount) > maxRaw) {
+    console.error(`refusing: quote ${Number(accepted.amount) / 1e30} NANO is above NANO_MAX_PAY (${process.env.NANO_MAX_PAY || '0.01'} NANO). Nothing signed.`);
+    process.exit(3);
+  }
 
   const info = await accountInfo(account);
   if (info.error) throw new Error('account_info: ' + info.error + ' (is the account opened and funded?)');
