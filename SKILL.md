@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.1.1
+version: 0.1.2
 metadata:
   openclaw:
     requires:
@@ -12,7 +12,7 @@ metadata:
         description: 64 hex characters. The wallet seed read by scripts/no-node.js and scripts/client-x402.js. Make one with `openssl rand -hex 32`, store it with mode 600, never print or transmit it.
       - name: NANO_MAX_PAY
         required: false
-        description: Spending cap for scripts/client-x402.js in NANO, default 0.01. A 402 quote above it is refused and nothing is signed. Raise it on purpose, per run.
+        description: Spending cap for scripts/client-x402.js in NANO as decimal text (0.05, 1, 0.000001), default 0.01. A 402 quote above it is refused and nothing is signed. Anything that is not a decimal amount falls back to 0.01 with a warning. Raise it on purpose, per run.
     emoji: "👛"
     homepage: https://pursekeeper.dev
 ---
