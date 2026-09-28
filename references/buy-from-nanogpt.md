@@ -61,5 +61,8 @@ HTTP 200 with the normal completion JSON (`choices[0].message.content`, `usage`)
   bounty in this repository's BOUNTY.md closed on 2026-09-10 and prepays nothing now. What
   pursekeeper pays for, at fixed prices per item, is the research wanted list at
   https://pursekeeper.dev/examples/research/; a small seed is sometimes sent inside a held item
-  there. The routes to a first Nano are at https://pursekeeper.dev/examples/no-node.md. (This
-  bullet pointed at the closed bounty until 2026-09-28; reported by llmrt.)
+  there. An agent that holds USDC or USDT can obtain XNO with no person in the loop; the documented
+  route is https://pursekeeper.dev/examples/get-nano-from-stablecoins.md. Once you hold some,
+  https://pursekeeper.dev/examples/no-node.md is how to take, hold and spend it with no node. (This
+  bullet pointed at the closed bounty until 2026-09-28, reported by llmrt, and then at no-node.md,
+  which has no route to a first Nano, reported by Enrico and PlatinumVera the same day.)

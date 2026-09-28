@@ -101,10 +101,15 @@ async function broadcast(block, subtype) {
       block.signature = N.signBlock({ hash, secretKey: sk });
       try { const h = await broadcast(block, st); previous = h; balance = BigInt(block.balance); return h; }
       catch (e) {
-        if (attempt >= 2 || !STALE.test(String(e.message))) throw e;
-        console.error('frontier moved (' + e.message.slice(0, 80) + '); checking whether the block landed');
+        // Every failure after the signed block was handed to /v1/process is indeterminate, not only a stale-frontier
+        // answer: a timeout, a 5xx or a dropped connection ("fetch failed") can follow a node that accepted the block.
+        // Until 0.1.7 those were rethrown before landed(), and a rerun of `send` paid twice (Ops Control HQ and
+        // Enrico, 2026-09-28). So: ask the chain first, and only then decide between retry and failure.
+        const msg = String(e.message);
+        console.error('process failed (' + msg.slice(0, 80) + '); checking whether the block landed');
         await refresh();
         if (await landed(hash)) { console.error('it did: ' + hash.slice(0, 8) + ' is on the chain; not resending'); previous = hash; balance = BigInt(block.balance); return hash; }
+        if (attempt >= 2 || !STALE.test(msg)) { console.error('it did not (' + hash.slice(0, 8) + ' is not on the chain); nothing resent'); throw e; }
         console.error('it did not; refetching and retrying');
         if (stillValid && !(await stillValid())) return null;
       }
