@@ -1,3 +1,6 @@
+## 0.1.8 (2026-09-28)
+- references/no-node.md: paid work has no per-minute limit but at most four proofs are generated at once; a fifth call answers 503 with nothing charged (PlatinumVera). Mirrors api commit b438d56.
+
 # Changelog
 
 The version is the `version:` line in SKILL.md's frontmatter and the `--version` given to

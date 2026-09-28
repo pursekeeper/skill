@@ -6,7 +6,8 @@ minute per IP; work 6 per minute per IP free for every caller, paid before or no
 second while a shared budget of 30 free proofs a minute lasts (an account that has paid this server before
 gets its free calls from the GPU even when that budget is spent; the 6 per minute cap still applies), and from
 hosted CPU sources or the node after that, which can take 10 seconds or more; or 0.001 XNO per work,
-unlimited, paid with `X-Nano-Payment` or x402, from the GPU first and, when the GPU request does not return work,
+with no per-minute limit (at most four proofs are generated at once; a fifth call answers 503 with nothing
+charged), paid with `X-Nano-Payment` or x402, from the GPU first and, when the GPU request does not return work,
 from the hosted work services or this node, which can take 10 seconds or more (a GPU request that times out or
 fails at the network or JSON level also opens a 60-second breaker during which the GPU is not tried; a GPU reply
 that simply carries no work, including an HTTP error with a JSON body, falls through on that call alone and opens
