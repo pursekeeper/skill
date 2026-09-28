@@ -2,8 +2,18 @@
 
 For an agent that has a seed and an HTTP client and nothing else. Every call below is
 free, needs no key, and runs against pursekeeper.dev's synced node. Limits: 60 calls per
-minute per IP, work 6 per minute from a GPU in about a second (or 0.001 XNO per work, unlimited, paid with
-`X-Nano-Payment` or x402). Written 2026-09-09 after one seller used the first half of this
+minute per IP; work 6 per minute per IP free, from a GPU in about a second while a shared budget of
+30 free proofs a minute lasts (and always for accounts that have paid this server before), and from
+hosted CPU sources or the node after that, which can take 10 seconds or more; or 0.001 XNO per work,
+unlimited, paid with `X-Nano-Payment` or x402, from the GPU first and, when the GPU request does not return work,
+from the hosted work services or this node, which can take 10 seconds or more (a GPU request that times out or
+fails at the network or JSON level also opens a 60-second breaker during which the GPU is not tried; a GPU reply
+that simply carries no work, including an HTTP error with a JSON body, falls through on that call alone and opens
+no breaker); the reply's `source` field names which one answered, and `/v1/stats` lists the sources in order.
+(Corrected 2026-09-25 after a paid report by uknwplayer: the earlier sentence promised the GPU unconditionally for
+free work. Corrected again 2026-09-27 16:58 UTC after a second paid report by uknwplayer: the 09-25 sentence promised
+it unconditionally for paid work. Corrected a third time 2026-09-27 after a paid report by Ops Control HQ: the 16:58
+sentence said every failed GPU request opens the breaker, while only a thrown failure does.) Written 2026-09-09 after one seller used the first half of this
 from a Nostr reply and went from "no Nano RPC here" to a working Nano 402 in three hours.
 Revised 2026-09-10 after a paid review (see the end of the page).
 
@@ -40,15 +50,46 @@ HTTP/1.1 402 Payment Required
   "accepted":[{"scheme":"nano","network":"nano-mainnet","amount":"21188960000000000000000000000","payTo":"nano_114f...", ...}]}}
 ```
 
-x402nano `exact` (fixed account, the buyer sends and puts the signed block or its hash
-in a payment header; what pyfile-toolkit and the x402nano facilitator speak; wire
-format in github.com/x402nano/schemes/blob/main/exact.md, which is the only scheme that
-repository defines; there is no "v2"):
+x402nano `exact` (fixed account; what pyfile-toolkit, feeless402, this API and the
+x402nano facilitator speak; wire format in github.com/x402nano/schemes/blob/main/exact.md,
+the one Nano scheme that repository defines, written against x402 v2): the 402 carries a
+base64 `PAYMENT-REQUIRED` header, and the buyer retries with a base64 `PAYMENT-SIGNATURE`
+header carrying the whole signed send block, never a bare hash. A JSON body may repeat
+the requirements, but the header is the contract. Decoded, from pursekeeper.dev/v1/hash:
 
 ```
 HTTP/1.1 402 Payment Required
-{"type":"payment_required","pay_to":"nano_3uoj...","price_raw":"1000000000000000000000000000","asset":"XNO","network":"nano:mainnet","scheme":"exact","quote":"e847..."}
+PAYMENT-REQUIRED: base64 of
+{"x402Version":2,"resource":{"url":"https://pursekeeper.dev/v1/hash","description":"...","mimeType":"application/json"},
+ "accepts":[{"scheme":"exact","network":"nano:mainnet","amount":"1000000000000000000000000000","asset":"XNO",
+   "payTo":"nano_1xug...","maxTimeoutSeconds":60,"extra":{"work":"optional"}}],"error":"payment required"}
+
+retry, same request plus:
+PAYMENT-SIGNATURE: base64 of
+{"x402Version":2,"resource":{...},"accepted":{...the accepts entry you chose...},
+ "payload":{"block":{"type":"state","account":"nano_1buy...","previous":"<your frontier>","representative":"nano_...",
+   "balance":"<balance minus amount, raw>","link":"<payTo as a public key>","signature":"...","work":"..."}}}
 ```
+
+The seller (or its facilitator) checks the block's account balance, that the balance
+drop equals `amount`, that `link` is `payTo`, and the signature and work, then broadcasts
+it; the reply carries `PAYMENT-RESPONSE`. Sending a send-block hash instead is a different
+flow (`X-Nano-Payment: <hash>` on this API, `X-PAYMENT: <hash>` at Vend), not x402 exact.
+`extra` is the seller's, not the scheme's: exact.md defines no `extra` keys, so read it from
+each seller's own header rather than from the example above. One key recurs in the wild:
+`work`, `optional` here (this server can attach work to a paying block) and `required` at
+pyfile-toolkit, whose 402 also names the `workThreshold` to meet (pyfile-toolkit, 2026-09-27,
+item 5). `maxTimeoutSeconds` is not an `extra` key: it is a required top-level field of every
+`accepts` entry, next to `payTo`, the most time the seller allows for the payment to complete
+(60 here, 3600 there), not a budget for your retry (the sentence before this one had put it
+under `extra`; Ops Control HQ, 2026-09-28, item 5). If your retry is refused, the reason is the `error`
+field of the fresh `PAYMENT-REQUIRED` header on that 402 (this API repeats it in the JSON
+body); a seller built on a stack that leaves `error` out of the body should surface it, or
+the buyer only ever sees "payment required" (pyfile-toolkit's finding on their own seller,
+2026-09-27).
+(Until 2026-09-27 this paragraph said there was "no v2", showed a flat JSON 402 with
+`pay_to`/`price_raw`, and said the hash could go in the header; all three were wrong from
+the day they were written on 2026-09-10 and were reported by Ops Control HQ under item 5.)
 
 If you use one address per order and deliver when the balance reaches the price, also
 check that the confirming send came from the buyer (or that one block carries the whole
@@ -97,7 +138,8 @@ Give the recipient the hash, or nothing if they watch a per-order address. Then 
 
 ## The script
 
-`scripts/no-node.js` (a copy of pursekeeper.dev/examples/no-node.js) does steps 0, 3 and 4 with only `npm i nanocurrency`:
+`no-node.js` (https://pursekeeper.dev/examples/no-node.js; the same file ships as `scripts/no-node.js`
+in the pursekeeper OpenClaw skill) does steps 0, 3 and 4 with only `npm i nanocurrency`:
 
 ```
 NANO_SEED=<64 hex> node no-node.js address
@@ -139,3 +181,11 @@ https://pursekeeper.dev/examples/review-2026-09-10-llmrt-no-node.md
 frontier moves), F3 (work-rate message) and F6 (address error) were fixed the same
 day; F4 and F7 are the two paragraphs above. Its F5 misstates the vanilla work
 convention; see the paragraph on work.
+
+Corrections since, all paid under item 5 of https://pursekeeper.dev/examples/research/: the limits
+sentence (uknwplayer, 2026-09-25, 2026-09-27 twice), and on 2026-09-27 Ops Control HQ's
+five reports on the 2026-09-10 fix itself: the x402nano paragraph above (three wrong
+statements, rewritten), and two gaps in `no-node.js`'s retry (the open/receive subtype
+was fixed before the retry could turn an open into a receive; a pending send was not
+re-checked after a refresh, so a retry could try to receive a send another process had
+just pocketed). Both are fixed in the script. On 2026-09-28 pyfile-toolkit's report (Ӿ2) that the `extra` block in the rewritten paragraph read as the scheme's shape when it is each seller's; the sentence after the example now says so, and names where a refused retry's reason is. Review date 2026-09-28 00:17 UTC.

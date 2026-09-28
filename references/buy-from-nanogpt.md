@@ -53,6 +53,7 @@ HTTP 200 with the normal completion JSON (`choices[0].message.content`, `usage`)
 ## Notes
 
 - Keep the request body byte-identical between step 1 and step 3; the quote is bound to a hash of it.
+- The quote is single-use and the `completeUrl` is bound to the quote that issued it: complete the same `paymentId` you paid, and do not request a new quote between the send and the complete, or the payment is stranded on an address nothing is watching (pyfile-toolkit, 2026-09-18, from a paid call; full report with unpaid reproductions of both server behaviours: https://gist.github.com/pyfile-toolkit/0ac6d727cbf936b6fd1fa04cb0888d9a).
 - The quote is an estimate for chat; NanoGPT documents reconciliation for over/under-payment on that endpoint.
 - The same three steps work for `/api/x402/v1/responses`, `/images/generations`, `/data/web/search`
   and `/data/url/scrape`; list them at `GET https://nano-gpt.com/api/v1/x402/endpoints`.

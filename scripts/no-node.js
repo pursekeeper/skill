@@ -57,7 +57,10 @@ async function broadcast(block, subtype) {
   // account_info and process), the node answers with a balance/previous error. Refetch
   // and retry once or twice instead of failing the whole command (finding F2 of the
   // 2026-09-10 review at /examples/review-2026-09-10-llmrt-no-node.md).
-  const STALE = /previous|balance|fork|gap/i;
+  // `unreceivable` is a guard only: the node checks previous-is-frontier before it checks the
+  // source (ledger.cpp, V28.2), so a send pocketed by a concurrent receive answers Fork, not
+  // Unreceivable; Ops Control HQ raised the case 2026-09-27 and it is matched anyway.
+  const STALE = /previous|balance|fork|gap|unreceivable/i;
   async function refresh() {
     const i = await get('/v1/account_info?account=' + account);
     if (i.error) throw new Error('account_info: ' + i.error);
@@ -65,16 +68,24 @@ async function broadcast(block, subtype) {
     balance = BigInt(i.balance_raw || '0');
     rep = i.representative || REP;
   }
-  async function publish(build, subtype) {
+  // subtype may be a function of the built block: a retry after refresh() can turn an
+  // open (previous all zero) into a receive when another process opened the account
+  // meanwhile, and the node checks the subtype it is given (Ops Control HQ, 2026-09-27).
+  // stillValid, if given, is re-checked after every refresh; when it answers false the
+  // retry's precondition is gone (the send was pocketed by a concurrent receive) and
+  // publish returns null instead of broadcasting a block that cannot be valid.
+  async function publish(build, subtype, stillValid) {
     for (let attempt = 0; ; attempt++) {
       const block = build();
-      block.work = await work(previous === '0'.repeat(64) ? pub : previous);   // open blocks: work on the account public key
+      const st = typeof subtype === 'function' ? subtype(block) : subtype;
+      block.work = await work(block.previous === '0'.repeat(64) ? pub : block.previous);   // open blocks: work on the account public key
       block.signature = N.signBlock({ hash: N.hashBlock(block), secretKey: sk });
-      try { return await broadcast(block, subtype); }
+      try { const hash = await broadcast(block, st); previous = hash; balance = BigInt(block.balance); return hash; }
       catch (e) {
         if (attempt >= 2 || !STALE.test(String(e.message))) throw e;
         console.error('frontier moved (' + e.message.slice(0, 80) + '); refetching and retrying');
         await refresh();
+        if (stillValid && !(await stillValid())) return null;
       }
     }
   }
@@ -86,11 +97,13 @@ async function broadcast(block, subtype) {
       // Skip a send that a concurrent receive already pocketed (seen after a retry).
       const still = await get('/v1/receivable?account=' + account);
       if (!still.blocks.some(x => x.hash === b.hash)) { console.error('already received ' + b.hash.slice(0, 8) + ', skipping'); continue; }
-      const open = () => previous === '0'.repeat(64);
-      const hash = await publish(() => ({ type: 'state', account, previous, representative: rep, balance: (balance + BigInt(b.amount_raw)).toString(), link: b.hash, work: null }), open() ? 'open' : 'receive');
-      balance += BigInt(b.amount_raw);
-      console.log((open() ? 'open ' : 'receive ') + fmt(b.amount_raw) + ' from ' + b.from + ' -> ' + hash);
-      previous = hash;
+      let kind;
+      const hash = await publish(
+        () => ({ type: 'state', account, previous, representative: rep, balance: (balance + BigInt(b.amount_raw)).toString(), link: b.hash, work: null }),
+        blk => (kind = blk.previous === '0'.repeat(64) ? 'open' : 'receive'),
+        async () => (await get('/v1/receivable?account=' + account)).blocks.some(x => x.hash === b.hash));
+      if (!hash) { console.error('already received ' + b.hash.slice(0, 8) + ' during the retry, skipping'); continue; }
+      console.log(kind + ' ' + fmt(b.amount_raw) + ' from ' + b.from + ' -> ' + hash);
     }
     return;
   }
@@ -105,7 +118,7 @@ async function broadcast(block, subtype) {
       if (amount > balance) throw new Error('balance changed to ' + fmt(balance) + ' XNO, below ' + fmt(amount));
       return { type: 'state', account, previous, representative: rep, balance: (balance - amount).toString(), link: N.derivePublicKey(to), work: null };
     }, 'send');
-    console.log('send ' + fmt(amount) + ' to ' + to + ' -> ' + hash + '  (confirm: ' + API + '/v1/verify?hash=' + hash + ')');
+    console.log('send ' + fmt(amount) + ' to ' + to + ' -> ' + hash + '  (confirm: ' + API + '/v1/verify?hash=' + hash + ')');   // publish() already moved previous/balance to the new frontier
     return;
   }
   throw new Error('unknown command ' + cmd);
