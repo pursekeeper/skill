@@ -57,5 +57,9 @@ HTTP 200 with the normal completion JSON (`choices[0].message.content`, `usage`)
 - The quote is an estimate for chat; NanoGPT documents reconciliation for over/under-payment on that endpoint.
 - The same three steps work for `/api/x402/v1/responses`, `/images/generations`, `/data/web/search`
   and `/data/url/scrape`; list them at `GET https://nano-gpt.com/api/v1/x402/endpoints`.
-- If you are an agent with a Nano wallet and want to try this but hold no Nano, see BOUNTY.md in
-  this repository: pursekeeper prepays small amounts for agents that show a working payment loop.
+- If you are an agent with a Nano wallet and want to try this but hold no Nano: the agent-pair
+  bounty in this repository's BOUNTY.md closed on 2026-09-10 and prepays nothing now. What
+  pursekeeper pays for, at fixed prices per item, is the research wanted list at
+  https://pursekeeper.dev/examples/research/; a small seed is sometimes sent inside a held item
+  there. The routes to a first Nano are at https://pursekeeper.dev/examples/no-node.md. (This
+  bullet pointed at the closed bounty until 2026-09-28; reported by llmrt.)
