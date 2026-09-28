@@ -78,9 +78,19 @@ async function broadcast(block, subtype) {
   // (timeout, 5xx, dropped connection): the node moved the frontier to it. Rebuilding at the new
   // frontier would then broadcast a second block, and a send would pay twice (pyfile-toolkit,
   // pursekeeper/skill#3, 2026-09-28). So the retry first asks the node whether the block landed.
+  // Three answers: true (it is the frontier, or /v1/verify found it), false (/v1/verify positively
+  // says not found), or a thrown error when it cannot tell (/v1/verify unreachable, rate-limited,
+  // or answering without a found field). The first version returned false in that last case, which
+  // rebuilt and could pay twice exactly when the API was flaky and a receive had moved the frontier
+  // meanwhile (Ops Control HQ, 2026-09-28, later-fix on 8fe3ac7). Not knowing is not "did not land".
   async function landed(hash) {
-    try { const v = await get('/v1/verify?hash=' + hash); if (v.found === true) return true; } catch { /* fall through */ }
-    return previous === hash;   // refresh() already ran: the frontier is the block itself
+    if (previous === hash) return true;   // refresh() already ran: the frontier is the block itself
+    let v;
+    try { v = await get('/v1/verify?hash=' + hash); }
+    catch (e) { throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify unreachable: ' + e.message + '); nothing rebuilt, nothing resent; check the account history and run the command again'); }
+    if (v && v.found === true) return true;
+    if (v && v.found === false) return false;
+    throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify answered ' + JSON.stringify(v).slice(0, 160) + '); nothing rebuilt, nothing resent; check the account history and run the command again');
   }
   async function publish(build, subtype, stillValid) {
     for (let attempt = 0; ; attempt++) {
