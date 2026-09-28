@@ -62,7 +62,13 @@ async function work(hash, origin) {
   const account = N.deriveAddress(N.derivePublicKey(sk), { useNanoPrefix: true });
   console.error('paying from', account);
 
-  const extraHeaders = process.env.HEADERS ? JSON.parse(process.env.HEADERS) : {}; // e.g. HEADERS='{"authorization":"Bearer ..."}'
+  // HEADERS: a JSON object of extra request headers, e.g. HEADERS='{"authorization":"Bearer ..."}'. Keys are
+  // lowercased first: fetch joins case variants of one name with ", " instead of replacing, so a caller's
+  // "Content-Type" used to arrive glued to the script's content-type, and a caller's "Payment-Signature"
+  // glued to the real payload (pyfile-toolkit, pursekeeper/skill#4, 2026-09-28). The caller's content-type
+  // wins over the default; the payment header is always the script's own.
+  const extraHeaders = Object.fromEntries(Object.entries(process.env.HEADERS ? JSON.parse(process.env.HEADERS) : {}).map(([k, v]) => [k.toLowerCase(), v]));
+  delete extraHeaders['payment-signature']; delete extraHeaders['x-payment'];
   const reqInit = () => ({ method: process.env.METHOD || 'GET', body: process.env.BODY, headers: { ...(process.env.BODY ? { 'content-type': 'application/json' } : {}), ...extraHeaders } });
   const first = await fetch(url, reqInit());
   if (first.status !== 402) { console.log(first.status, await first.text()); return; }
@@ -105,7 +111,7 @@ async function work(hash, origin) {
   console.error('signed block', hash);
 
   const payload = { x402Version: 2, resource: pr.resource, accepted, payload: { block } };
-  const init = reqInit(); init.headers['PAYMENT-SIGNATURE'] = b64(payload);
+  const init = reqInit(); init.headers['payment-signature'] = b64(payload);   // header names are case-insensitive; lowercase keeps the map free of case variants
   const r = await fetch(url, init);
   const settle = r.headers.get('payment-response');
   if (settle) console.error('settlement:', unb64(settle));

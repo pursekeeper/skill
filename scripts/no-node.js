@@ -74,17 +74,28 @@ async function broadcast(block, subtype) {
   // stillValid, if given, is re-checked after every refresh; when it answers false the
   // retry's precondition is gone (the send was pocketed by a concurrent receive) and
   // publish returns null instead of broadcasting a block that cannot be valid.
+  // A "frontier moved" answer can mean the block just sent was accepted and only the reply was lost
+  // (timeout, 5xx, dropped connection): the node moved the frontier to it. Rebuilding at the new
+  // frontier would then broadcast a second block, and a send would pay twice (pyfile-toolkit,
+  // pursekeeper/skill#3, 2026-09-28). So the retry first asks the node whether the block landed.
+  async function landed(hash) {
+    try { const v = await get('/v1/verify?hash=' + hash); if (v.found === true) return true; } catch { /* fall through */ }
+    return previous === hash;   // refresh() already ran: the frontier is the block itself
+  }
   async function publish(build, subtype, stillValid) {
     for (let attempt = 0; ; attempt++) {
       const block = build();
       const st = typeof subtype === 'function' ? subtype(block) : subtype;
       block.work = await work(block.previous === '0'.repeat(64) ? pub : block.previous);   // open blocks: work on the account public key
-      block.signature = N.signBlock({ hash: N.hashBlock(block), secretKey: sk });
-      try { const hash = await broadcast(block, st); previous = hash; balance = BigInt(block.balance); return hash; }
+      const hash = N.hashBlock(block);
+      block.signature = N.signBlock({ hash, secretKey: sk });
+      try { const h = await broadcast(block, st); previous = h; balance = BigInt(block.balance); return h; }
       catch (e) {
         if (attempt >= 2 || !STALE.test(String(e.message))) throw e;
-        console.error('frontier moved (' + e.message.slice(0, 80) + '); refetching and retrying');
+        console.error('frontier moved (' + e.message.slice(0, 80) + '); checking whether the block landed');
         await refresh();
+        if (await landed(hash)) { console.error('it did: ' + hash.slice(0, 8) + ' is on the chain; not resending'); previous = hash; balance = BigInt(block.balance); return hash; }
+        console.error('it did not; refetching and retrying');
         if (stillValid && !(await stillValid())) return null;
       }
     }

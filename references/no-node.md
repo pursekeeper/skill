@@ -2,8 +2,9 @@
 
 For an agent that has a seed and an HTTP client and nothing else. Every call below is
 free, needs no key, and runs against pursekeeper.dev's synced node. Limits: 60 calls per
-minute per IP; work 6 per minute per IP free, from a GPU in about a second while a shared budget of
-30 free proofs a minute lasts (and always for accounts that have paid this server before), and from
+minute per IP; work 6 per minute per IP free for every caller, paid before or not, from a GPU in about a
+second while a shared budget of 30 free proofs a minute lasts (an account that has paid this server before
+gets its free calls from the GPU even when that budget is spent; the 6 per minute cap still applies), and from
 hosted CPU sources or the node after that, which can take 10 seconds or more; or 0.001 XNO per work,
 unlimited, paid with `X-Nano-Payment` or x402, from the GPU first and, when the GPU request does not return work,
 from the hosted work services or this node, which can take 10 seconds or more (a GPU request that times out or
