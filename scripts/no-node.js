@@ -107,7 +107,11 @@ async function broadcast(block, subtype) {
         // Enrico, 2026-09-28). So: ask the chain first, and only then decide between retry and failure.
         const msg = String(e.message);
         console.error('process failed (' + msg.slice(0, 80) + '); checking whether the block landed');
-        await refresh();
+        // The follow-up read must not be allowed to fail on its own: unprotected, its account_info error ended the command
+        // with no warning naming the hash, and a rerun of `send` built on the landed block and paid twice (Ops Control HQ,
+        // 2026-09-28 22:28 UTC). Same rule as landed(): not knowing is not "did not land".
+        try { await refresh(); }
+        catch (e2) { throw new Error('process failed (' + msg.slice(0, 80) + ') and the follow-up account_info read failed (' + e2.message + '): cannot tell whether ' + hash + ' landed; nothing rebuilt, nothing resent; check the account history before running the command again'); }
         if (await landed(hash)) { console.error('it did: ' + hash.slice(0, 8) + ' is on the chain; not resending'); previous = hash; balance = BigInt(block.balance); return hash; }
         if (attempt >= 2 || !STALE.test(msg)) { console.error('it did not (' + hash.slice(0, 8) + ' is not on the chain); nothing resent'); throw e; }
         console.error('it did not; refetching and retrying');

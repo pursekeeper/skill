@@ -1,3 +1,6 @@
+## 0.1.9 (2026-09-29)
+- scripts/no-node.js: the follow-up account_info read after a failed /v1/process call is protected; when that read fails too the command stops with the full hash and "nothing rebuilt, nothing resent" instead of exiting on the read error, after which a rerun of `send` built on the landed block and paid twice (Ops Control HQ, 2026-09-28 22:28 UTC). Mirrors api examples/no-node.js.
+
 ## 0.1.8 (2026-09-28)
 - references/no-node.md: paid work has no per-minute limit but at most four proofs are generated at once; a fifth call answers 503 with nothing charged (PlatinumVera). Mirrors api commit b438d56.
 
