@@ -86,7 +86,7 @@ async function broadcast(block, subtype) {
   async function landed(hash) {
     if (previous === hash) return true;   // refresh() already ran: the frontier is the block itself
     let v;
-    try { v = await get('/v1/verify?hash=' + hash); }
+    try { v = await get('/v1/verify?hash=' + hash + '&any=1'); }   // any=1: only "is it a confirmed send"; /v1/verify requires a minimum otherwise (2026-09-29)
     catch (e) { throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify unreachable: ' + e.message + ')'); }
     if (v && v.found === true) return true;
     if (v && v.found === false) return false;

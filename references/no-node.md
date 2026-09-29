@@ -136,7 +136,8 @@ POST https://pursekeeper.dev/v1/process {"block": {...with signature...}, "subty
 
 Same shape: `balance: old - amount`, `link: <recipient public key>`, `subtype: "send"`.
 Give the recipient the hash, or nothing if they watch a per-order address. Then confirm:
-`GET /v1/verify?hash=...`.
+`GET /v1/verify?hash=...&min_raw=<amount>` (or `&any=1` to ask only whether it is a confirmed send; without
+either, `ok` is false and `reason` says why).
 
 ## The script
 

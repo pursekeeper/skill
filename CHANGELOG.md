@@ -1,3 +1,10 @@
+## 0.1.11 (2026-09-29)
+- scripts/client-x402.js: when the seller answers 402 after the payment with a note saying the block was broadcast but not yet confirmed (pursekeeper.dev waits up to 8 s for confirmation before serving since api 6bb658a), the client re-presents the same PAYMENT-SIGNATURE every 2 s for up to a minute instead of failing; it never signs a new block there, which would pay twice.
+- scripts/no-node.js: landed() asks `/v1/verify?hash=H&any=1` (existence only). `/v1/verify` without a minimum now answers ok:false with the reason; landed() reads `found`, so older copies keep working, but the call now says what it asks.
+- references/no-node.md: the verify line names min_raw and any=1.
+- SKILL.md: the newcomer seller credit is paused until the 2026-10-07 review (granted credits honoured); the line that said a new seller can ask for it was stale since 2026-09-29 07:24 UTC.
+Mirrors api commit 6bb658a.
+
 ## 0.1.10 (2026-09-29)
 - scripts/no-node.js: when a retry's /v1/process call fails and the follow-up read (account_info, or /v1/verify inside landed()) fails too, the stop message names every block hash this run handed to /v1/process, says which were not on the chain when checked and which one is unknown, and asks for the account history of all of them. Until 0.1.9 it named only the current hash and said "nothing rebuilt, nothing resent", which was false once a second block had been built and posted (uknwplayer, 2026-09-29). Mirrors api examples/no-node.js.
 

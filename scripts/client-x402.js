@@ -112,7 +112,17 @@ async function work(hash, origin) {
 
   const payload = { x402Version: 2, resource: pr.resource, accepted, payload: { block } };
   const init = reqInit(); init.headers['payment-signature'] = b64(payload);   // header names are case-insensitive; lowercase keeps the map free of case variants
-  const r = await fetch(url, init);
+  let r = await fetch(url, init);
+  // A 402 after the payment whose note says the block was broadcast but not yet confirmed (pursekeeper.dev waits 8 s for
+  // confirmation before serving, since 2026-09-29): the block is on the chain, so re-present the same payload for up to a
+  // minute. Never sign a new block here: the frontier has moved to the pending block and a new send would pay twice.
+  for (let waited = 0; r.status === 402 && waited < 60_000; waited += 2000) {
+    const b = await r.clone().json().catch(() => null);
+    if (!b || !/broadcast but not yet confirmed/.test(String(b.note || b.error || ''))) break;
+    console.error('block ' + hash + ' broadcast, not yet confirmed; re-presenting the same payment');
+    await new Promise(s => setTimeout(s, 2000));
+    r = await fetch(url, init);
+  }
   const settle = r.headers.get('payment-response');
   if (settle) console.error('settlement:', unb64(settle));
   console.log(r.status, await r.text());
