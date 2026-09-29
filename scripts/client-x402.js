@@ -119,6 +119,10 @@ async function work(hash, origin) {
   for (let waited = 0; r.status === 402 && waited < 60_000; waited += 2000) {
     const b = await r.clone().json().catch(() => null);
     if (!b || !/broadcast but not yet confirmed/.test(String(b.note || b.error || ''))) break;
+    // The 402 carries a single-use token (since 2026-09-29 16:xx UTC) that binds the re-presentation to this client: the
+    // block is public on the chain from the broadcast, so without it anyone could present the same block and be served.
+    const tok = r.headers.get('x-nano-represent') || (b && b.represent_token);
+    if (tok) init.headers['x-nano-represent'] = String(tok);
     console.error('block ' + hash + ' broadcast, not yet confirmed; re-presenting the same payment');
     await new Promise(s => setTimeout(s, 2000));
     r = await fetch(url, init);
