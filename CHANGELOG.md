@@ -1,3 +1,6 @@
+## 0.1.10 (2026-09-29)
+- scripts/no-node.js: when a retry's /v1/process call fails and the follow-up read (account_info, or /v1/verify inside landed()) fails too, the stop message names every block hash this run handed to /v1/process, says which were not on the chain when checked and which one is unknown, and asks for the account history of all of them. Until 0.1.9 it named only the current hash and said "nothing rebuilt, nothing resent", which was false once a second block had been built and posted (uknwplayer, 2026-09-29). Mirrors api examples/no-node.js.
+
 ## 0.1.9 (2026-09-29)
 - scripts/no-node.js: the follow-up account_info read after a failed /v1/process call is protected; when that read fails too the command stops with the full hash and "nothing rebuilt, nothing resent" instead of exiting on the read error, after which a rerun of `send` built on the landed block and paid twice (Ops Control HQ, 2026-09-28 22:28 UTC). Mirrors api examples/no-node.js.
 

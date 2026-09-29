@@ -87,18 +87,30 @@ async function broadcast(block, subtype) {
     if (previous === hash) return true;   // refresh() already ran: the frontier is the block itself
     let v;
     try { v = await get('/v1/verify?hash=' + hash); }
-    catch (e) { throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify unreachable: ' + e.message + '); nothing rebuilt, nothing resent; check the account history and run the command again'); }
+    catch (e) { throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify unreachable: ' + e.message + ')'); }
     if (v && v.found === true) return true;
     if (v && v.found === false) return false;
-    throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify answered ' + JSON.stringify(v).slice(0, 160) + '); nothing rebuilt, nothing resent; check the account history and run the command again');
+    throw new Error('cannot tell whether ' + hash + ' landed (/v1/verify answered ' + JSON.stringify(v).slice(0, 160) + ')');   // publish() adds what this run posted
   }
   async function publish(build, subtype, stillValid) {
+    // Every block hash this call has handed to /v1/process, oldest first. On a retry the earlier block has been rebuilt
+    // and a second one posted, so a stop message naming only one hash and saying "nothing rebuilt, nothing resent" was
+    // false from the second attempt on, and a reader who checked that one hash could miss the other landing
+    // (uknwplayer, 2026-09-29). Every stop names all of them; not knowing is still not "did not land".
+    const posted = [];
+    const stop = why => {
+      const earlier = posted.slice(0, -1), last = posted[posted.length - 1];
+      return new Error(why + '; nothing further is rebuilt or resent. Block' + (posted.length > 1 ? 's' : '') + ' handed to /v1/process by this run: ' + posted.join(', ') +
+        (earlier.length ? '. ' + earlier.join(', ') + (earlier.length > 1 ? ' were' : ' was') + ' not on the chain when checked, before the next block was built; ' + last + ' is the one this run cannot tell about' : '') +
+        '. Check the account history for ' + (earlier.length ? 'all of them' : 'it') + ' before running the command again');
+    };
     for (let attempt = 0; ; attempt++) {
       const block = build();
       const st = typeof subtype === 'function' ? subtype(block) : subtype;
       block.work = await work(block.previous === '0'.repeat(64) ? pub : block.previous);   // open blocks: work on the account public key
       const hash = N.hashBlock(block);
       block.signature = N.signBlock({ hash, secretKey: sk });
+      posted.push(hash);
       try { const h = await broadcast(block, st); previous = h; balance = BigInt(block.balance); return h; }
       catch (e) {
         // Every failure after the signed block was handed to /v1/process is indeterminate, not only a stale-frontier
@@ -111,8 +123,10 @@ async function broadcast(block, subtype) {
         // with no warning naming the hash, and a rerun of `send` built on the landed block and paid twice (Ops Control HQ,
         // 2026-09-28 22:28 UTC). Same rule as landed(): not knowing is not "did not land".
         try { await refresh(); }
-        catch (e2) { throw new Error('process failed (' + msg.slice(0, 80) + ') and the follow-up account_info read failed (' + e2.message + '): cannot tell whether ' + hash + ' landed; nothing rebuilt, nothing resent; check the account history before running the command again'); }
-        if (await landed(hash)) { console.error('it did: ' + hash.slice(0, 8) + ' is on the chain; not resending'); previous = hash; balance = BigInt(block.balance); return hash; }
+        catch (e2) { throw stop('process failed (' + msg.slice(0, 80) + ') and the follow-up account_info read failed (' + e2.message + '): cannot tell whether ' + hash + ' landed'); }
+        let onChain;
+        try { onChain = await landed(hash); } catch (e3) { throw stop(e3.message); }
+        if (onChain) { console.error('it did: ' + hash.slice(0, 8) + ' is on the chain; not resending'); previous = hash; balance = BigInt(block.balance); return hash; }
         if (attempt >= 2 || !STALE.test(msg)) { console.error('it did not (' + hash.slice(0, 8) + ' is not on the chain); nothing resent'); throw e; }
         console.error('it did not; refetching and retrying');
         if (stillValid && !(await stillValid())) return null;
