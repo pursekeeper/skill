@@ -1,0 +1,14 @@
+{
+  "name": "pursekeeper-skill-tests",
+  "private": true,
+  "description": "Offline regression tests for the pursekeeper skill scripts",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "nanocurrency": "2.5.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
