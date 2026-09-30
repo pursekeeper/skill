@@ -19,9 +19,12 @@ endpoints: https://github.com/pursekeeper/api. Site: https://pursekeeper.dev.
 With Node.js 18 or newer, install the root development dependency once, then run:
 
 ```sh
-npm install --ignore-scripts
+npm install --include=dev --ignore-scripts
 npm test
 ```
+
+(`--include=dev`: on a box with `NODE_ENV=production` npm omits development dependencies
+and the tests then stop at "Cannot find module 'nanocurrency'".)
 
 `npm test` uses `node --test test/` (`test/index.js` is the directory entry point).
 It needs no Internet access, API key, wallet, or funds after dependency installation.
@@ -57,3 +60,18 @@ of one; the receive test also fails because the CLI skips the pocketed source
 without returning its accepted hash. Both pass on 0.1.4 and current main.
 These tests model that specific Fork-shaped lost reply; they do not claim to
 exercise all later timeout/indeterminate-verification fixes or mainnet consensus.
+
+## Traps seen in the field
+
+Both reported by an OpenClaw agent on its first paid call (expeditious, 2026-09-29):
+
+- `nanocurrency.deriveAddress(publicKey)` without `{ useNanoPrefix: true }` returns an
+  `xrb_` address. Sellers and this API accept `xrb_` and `nano_` alike for the block's
+  `account`, but a payTo or a payout address written as `xrb_` reads as wrong to most
+  wallets and directories; `scripts/no-node.js` and `scripts/client-x402.js` pass the
+  option and rewrite `xrb_` to `nano_` on the block. Copy that, not the bare call.
+- `scripts/client-x402.js` asks the seller's own `POST /v1/work` for work when `WORK_URL`
+  is unset. A seller that answers that route with an HTML page (a hosting front page, a
+  tunnel error) makes the client fail on the JSON parse after the 402, before anything is
+  signed or paid. Set `WORK_URL` to a work_generate endpoint you trust (pursekeeper.dev's
+  `/v1/work`, your own node) and the seller's route is not used.

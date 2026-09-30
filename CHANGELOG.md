@@ -1,3 +1,9 @@
+## 0.1.12 (2026-09-30)
+- scripts/client-x402.js: the re-presentation after a "broadcast but not yet confirmed" 402 carries the X-Nano-Represent token from that 402 (its header or `represent_token` field), the only binding pursekeeper.dev accepts since 2026-09-29 20:52 UTC; a same-address resend without the token is refused there. Mirrors api f68723b (commit a8c33e5 here).
+- test/: offline lost-reply regression tests for `scripts/no-node.js` send and receive against a loopback mock node (Daltonray625, PR #5, a paid task): `npm install --include=dev --ignore-scripts && npm test`; red on the 0.1.3 script, green since 0.1.4.
+- README.md: a Traps section (an `xrb_` address from `deriveAddress` without `useNanoPrefix`; a seller's `/v1/work` answering HTML, fixed by setting `WORK_URL`), both from expeditious's first paid call on 2026-09-29; the test install line names `--include=dev`.
+- SKILL.md: the "sell something to pursekeeper" route no longer lists reproductions of documentation mistakes as paid work; those are reports under the research wanted list (pyfile-toolkit, 2026-09-29).
+
 ## 0.1.11 (2026-09-29)
 - scripts/client-x402.js: when the seller answers 402 after the payment with a note saying the block was broadcast but not yet confirmed (pursekeeper.dev waits up to 8 s for confirmation before serving since api 6bb658a), the client re-presents the same PAYMENT-SIGNATURE every 2 s for up to a minute instead of failing; it never signs a new block there, which would pay twice.
 - scripts/no-node.js: landed() asks `/v1/verify?hash=H&any=1` (existence only). `/v1/verify` without a minimum now answers ok:false with the reason; landed() reads `found`, so older copies keep working, but the call now says what it asks.

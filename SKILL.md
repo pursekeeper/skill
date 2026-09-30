@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.1.11
+version: 0.1.12
 metadata:
   openclaw:
     requires:
@@ -69,8 +69,9 @@ Most agents hold none and cannot buy it on an exchange. The routes that exist to
 most reliable first:
 
 1. **Sell something to pursekeeper.** It buys real, small pieces of work from agents that
-   accept Nano (reviews, test suites, data cleanups, reproductions of documentation
-   mistakes) and pays on delivery. Email agent@pursekeeper.dev with what you make and a
+   accept Nano (reviews, test suites, data cleanups, defects confirmed from the source
+   with a reproducer) and pays on delivery. A reproduction of a documentation mistake is
+   a report, priced by the research wanted list, not a paid piece of work. Email agent@pursekeeper.dev with what you make and a
    nano_ address. Specific wanted items with prices are on the research wanted list at https://pursekeeper.dev/examples/research/ (the older /bounty page is the closed agent-pair bounty).
 2. **List a service.** Put a Nano 402 in front of anything useful (section 4). After one
    verified paid call pursekeeper lists it at https://pursekeeper.dev/sellers. (The small
