@@ -6,6 +6,7 @@
 //
 // Env: NANO_SEED (required), NANO_INDEX (account index, default 0),
 //      NANO_MAX_PAY (spending cap in NANO as decimal text, default 0.01; a 402 quote above it is refused, nothing signed, exit 3),
+// Exit codes: 0 when the call was served (2xx), 1 when it ended on any other status or threw, 2 without a seed, 3 above the cap.
 //      NANO_RPC (optional node RPC override for account_info),
 //      API (no-node account-info service, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint),
@@ -71,7 +72,7 @@ async function work(hash, origin) {
   delete extraHeaders['payment-signature']; delete extraHeaders['x-payment'];
   const reqInit = () => ({ method: process.env.METHOD || 'GET', body: process.env.BODY, headers: { ...(process.env.BODY ? { 'content-type': 'application/json' } : {}), ...extraHeaders } });
   const first = await fetch(url, reqInit());
-  if (first.status !== 402) { console.log(first.status, await first.text()); return; }
+  if (first.status !== 402) { console.log(first.status, await first.text()); if (first.status < 200 || first.status >= 300) process.exitCode = 1; return; }
   const hdr = first.headers.get('payment-required');
   const pr = hdr ? unb64(hdr) : (await first.json()).x402;
   if (!pr || pr.x402Version !== 2) throw new Error('no x402 v2 PaymentRequired in the 402');
@@ -122,12 +123,22 @@ async function work(hash, origin) {
     // The 402 carries a single-use token (since 2026-09-29 16:xx UTC) that binds the re-presentation to this client: the
     // block is public on the chain from the broadcast, so without it anyone could present the same block and be served.
     const tok = r.headers.get('x-nano-represent') || (b && b.represent_token);
-    if (tok) init.headers['x-nano-represent'] = String(tok);
+    // The token is single-use and init is reused by this loop, so a 402 that carries no token must clear the previous one
+    // rather than re-present it spent (pyfile-toolkit, 2026-10-02; pursekeeper.dev sends a fresh token with every such 402,
+    // so the branch is for other sellers).
+    if (tok) init.headers['x-nano-represent'] = String(tok); else delete init.headers['x-nano-represent'];
     console.error('block ' + hash + ' broadcast, not yet confirmed; re-presenting the same payment');
     await new Promise(s => setTimeout(s, 2000));
     r = await fetch(url, init);
   }
   const settle = r.headers.get('payment-response');
   if (settle) console.error('settlement:', unb64(settle));
+  // x-nano-replay: true marks a reply served again from the seller's ten-minute replay cache (the same payment, method, URL
+  // and body re-presented after a lost reply); it is the reply that was paid for, not a refusal.
+  if (r.headers.get('x-nano-replay') === 'true') console.error('reply served again from the seller\'s replay cache (x-nano-replay: true)');
   console.log(r.status, await r.text());
+  // Anything but 2xx after the payment means the call was not served: exit 1, so a caller that reads only the return code
+  // does not count an unserved call as done (pyfile-toolkit, 2026-10-02). The body printed above is the seller's last answer;
+  // for a not-yet-confirmed 402 it carries the X-Nano-Represent token to re-present the same block with later.
+  if (r.status < 200 || r.status >= 300) process.exitCode = 1;
 })().catch(e => { console.error('error:', e.message); process.exit(1); });
