@@ -162,7 +162,7 @@ async function broadcast(block, subtype) {
       if (amount > balance) throw new Error('balance changed to ' + fmt(balance) + ' XNO, below ' + fmt(amount));
       return { type: 'state', account, previous, representative: rep, balance: (balance - amount).toString(), link: N.derivePublicKey(to), work: null };
     }, 'send');
-    console.log('send ' + fmt(amount) + ' to ' + to + ' -> ' + hash + '  (confirm: ' + API + '/v1/verify?hash=' + hash + ')');   // publish() already moved previous/balance to the new frontier
+    console.log('send ' + fmt(amount) + ' to ' + to + ' -> ' + hash + '  (confirm: ' + API + '/v1/verify?hash=' + hash + '&any=1&any_to=1)');   // both flags: ok needs an amount side and a recipient side (2026-10-03)   // publish() already moved previous/balance to the new frontier
     return;
   }
   throw new Error('unknown command ' + cmd);

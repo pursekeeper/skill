@@ -117,16 +117,20 @@ async function work(hash, origin) {
   // A 402 after the payment whose note says the block was broadcast but not yet confirmed (pursekeeper.dev waits 8 s for
   // confirmation before serving, since 2026-09-29): the block is on the chain, so re-present the same payload for up to a
   // minute. Never sign a new block here: the frontier has moved to the pending block and a new send would pay twice.
+  // The seller may word a later 402 differently while the block is still unconfirmed (pursekeeper.dev's alreadyLanded gate
+  // said "on the node but not confirmed yet" with no token until 2026-10-03, and the loop stopped on it: PlatinumVera,
+  // 2026-10-03), so any "not confirmed" wording keeps the loop going.
+  let lastToken = null;
   for (let waited = 0; r.status === 402 && waited < 60_000; waited += 2000) {
     const b = await r.clone().json().catch(() => null);
-    if (!b || !/broadcast but not yet confirmed/.test(String(b.note || b.error || ''))) break;
+    if (!b || !/not (yet )?confirmed/.test(String(b.note || b.error || ''))) break;
     // The 402 carries a single-use token (since 2026-09-29 16:xx UTC) that binds the re-presentation to this client: the
     // block is public on the chain from the broadcast, so without it anyone could present the same block and be served.
     const tok = r.headers.get('x-nano-represent') || (b && b.represent_token);
     // The token is single-use and init is reused by this loop, so a 402 that carries no token must clear the previous one
-    // rather than re-present it spent (pyfile-toolkit, 2026-10-02; pursekeeper.dev sends a fresh token with every such 402,
-    // so the branch is for other sellers).
-    if (tok) init.headers['x-nano-represent'] = String(tok); else delete init.headers['x-nano-represent'];
+    // rather than re-present it spent (pyfile-toolkit, 2026-10-02; pursekeeper.dev sends the token with every such 402 to
+    // its holder, so the branch is for other sellers). The last token seen is kept for the stderr line below.
+    if (tok) { init.headers['x-nano-represent'] = String(tok); lastToken = String(tok); } else delete init.headers['x-nano-represent'];
     console.error('block ' + hash + ' broadcast, not yet confirmed; re-presenting the same payment');
     await new Promise(s => setTimeout(s, 2000));
     r = await fetch(url, init);
@@ -140,5 +144,10 @@ async function work(hash, origin) {
   // Anything but 2xx after the payment means the call was not served: exit 1, so a caller that reads only the return code
   // does not count an unserved call as done (pyfile-toolkit, 2026-10-02). The body printed above is the seller's last answer;
   // for a not-yet-confirmed 402 it carries the X-Nano-Represent token to re-present the same block with later.
-  if (r.status < 200 || r.status >= 300) process.exitCode = 1;
+  if (r.status < 200 || r.status >= 300) {
+    process.exitCode = 1;
+    // What the payer needs to get the call later without paying again: the block hash and the last token seen, even when
+    // the final 402 printed above carries neither (PlatinumVera, 2026-10-03).
+    console.error('not served; the block is on the chain: hash ' + hash + (lastToken ? ', X-Nano-Represent token ' + lastToken : ', no X-Nano-Represent token was issued') + '; re-present the same PAYMENT-SIGNATURE for the same call with that token, do not sign a new block');
+  }
 })().catch(e => { console.error('error:', e.message); process.exit(1); });
