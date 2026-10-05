@@ -79,9 +79,14 @@ it; the reply carries `PAYMENT-RESPONSE`. Sending a send-block hash instead is a
 flow (`X-Nano-Payment: <hash>` on this API, `X-PAYMENT: <hash>` at Vend), not x402 exact.
 `extra` is the seller's, not the scheme's: exact.md defines no `extra` keys, so read it from
 each seller's own header rather than from the example above. One key recurs in the wild:
-`work`, `optional` here (this server can attach work to a paying block) and `required` at
-pyfile-toolkit, whose 402 also names the `workThreshold` to meet (pyfile-toolkit, 2026-09-27,
-item 5). `maxTimeoutSeconds` is not an `extra` key: it is a required top-level field of every
+`work`, `optional` here (a paying request to this API's own routes may carry a workless block,
+or `work: "0"`, and this server attaches the work before broadcasting; the hosted facilitator at
+facilitator.pursekeeper.dev has no work source, says `required` in its /supported and refuses a
+workless block naming the field) and `required` at pyfile-toolkit; both 402s name the
+`workThreshold` to meet (pyfile-toolkit, 2026-09-27 and 2026-10-05, item 5). Work covers the
+block's `previous`, your confirmed frontier, never the new block's own hash: work asked from
+POST /v1/work for the new block's hash is valid for that hash and useless for the block (the
+2026-10-05 report). `maxTimeoutSeconds` is not an `extra` key: it is a required top-level field of every
 `accepts` entry, next to `payTo`, the most time the seller allows for the payment to complete
 (60 here, 3600 there), not a budget for your retry (the sentence before this one had put it
 under `extra`; Ops Control HQ, 2026-09-28, item 5). If your retry is refused, the reason is the `error`

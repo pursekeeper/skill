@@ -148,6 +148,13 @@ async function work(hash, origin) {
     process.exitCode = 1;
     // What the payer needs to get the call later without paying again: the block hash and the last token seen, even when
     // the final 402 printed above carries neither (PlatinumVera, 2026-10-03).
-    console.error('not served; the block is on the chain: hash ' + hash + (lastToken ? ', X-Nano-Represent token ' + lastToken : ', no X-Nano-Represent token was issued') + '; re-present the same PAYMENT-SIGNATURE for the same call with that token, do not sign a new block');
+    // Say whether the block was broadcast instead of assuming it: a seller that refuses a paid call before
+    // settling leaves the frontier unchanged, and the same signed payload is still good (pyfile-toolkit /web/search, 2026-10-05).
+    let frontier = null;
+    try { frontier = String((await accountInfo(account)).frontier || '').toUpperCase(); } catch { /* cannot tell; the line below says so */ }
+    const where = frontier === null ? 'could not read the account to tell whether the block was broadcast'
+      : frontier === String(hash).toUpperCase() ? 'the block is on the chain'
+      : 'the account frontier is still ' + frontier + ', so the seller did not broadcast the block and nothing moved';
+    console.error('not served; ' + where + ': hash ' + hash + (lastToken ? ', X-Nano-Represent token ' + lastToken : ', no X-Nano-Represent token was issued') + '; re-present the same PAYMENT-SIGNATURE for the same call' + (lastToken ? ' with that token' : '') + ', do not sign a new block');
   }
 })().catch(e => { console.error('error:', e.message); process.exit(1); });
