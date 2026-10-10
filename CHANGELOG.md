@@ -1,3 +1,8 @@
+## 0.2.3 (2026-10-10)
+- scripts/inference-proxy.js: every common runtime credential header is dropped before the request reaches the door: `authorization`, `proxy-authorization`, `x-api-key`, `api-key`, `x-auth-token`, `x-goog-api-key`, `cookie`. Until now only the first two were dropped, so a runtime that sends its key as `x-api-key` (the Anthropic-style convention) forwarded the exact value to `UPSTREAM`, on the paid path and on a plain relay alike, while the reference promised the key never reaches the door (pyfile-toolkit, pursekeeper/api#89, 2026-10-10, reproduced from the v0.2.2 tag with their harness; defect slot 3 of 3).
+- test/inference-proxy.js: 25 cases; the new case sends six synthetic credential headers plus one ordinary header through a paid call and through a plain relay, and asserts the credentials are absent and the ordinary header present at the door.
+- references/inference-proxy.md: names the headers that are dropped.
+
 ## 0.2.2 (2026-10-10)
 - scripts/inference-proxy.js: the buffered `stream:true` wrap (a door answering a stream request with a plain completion) now carries the whole message as the one chunk's `delta`: `content`, `tool_calls` with an `index` per call, `refusal` and any other field in `message`. Until now the delta was built from `content` alone, so a tool-call completion came back as `finish_reason: "tool_calls"` with the call id, name and arguments dropped, and the agent could not run the tool it had just paid for (pyfile-toolkit, pursekeeper/api#89, 2026-10-10, reproduced from the v0.2.1 tag with their harness; defect slot 2).
 - test/inference-proxy.js: 24 cases; the mock door takes a `completion` override, and the new case asserts the tool call, its index, the null refusal and the single broadcast.

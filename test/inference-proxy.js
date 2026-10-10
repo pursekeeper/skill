@@ -88,6 +88,7 @@ function mockDoor(node, opts) {
       return serve();
     }
     if (!req.url.startsWith('/v1/')) return out(404, {}, '{}');
+    if (opts.free && req.url === opts.free) return serve(); // a path the door serves without a 402
     const host = req.headers.host;
     const payTo = opts.payTo || N.deriveAddress(N.derivePublicKey(randomBytes(32).toString('hex')), { useNanoPrefix: true });
     if (st.mode === 'exact') {
@@ -270,6 +271,27 @@ test('stream:true buffered wrap keeps tool_calls (with index), refusal and any o
   assert.equal(d.content, '');
   assert.deepEqual(d.tool_calls, [{ index: 0, ...tool_calls[0] }]);
   assert.equal(d.refusal, null);
+  assert.equal(s.node.st.processed.length, 1);
+});
+
+test('runtime credentials in any common header are dropped before the door sees them, on the paid path and the plain relay (pyfile-toolkit, api#89 slot 3)', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI, free: '/v1/models' });
+  const creds = { 'x-api-key': 'SYNTHETIC-X-API-KEY', 'api-key': 'SYNTHETIC-API-KEY', 'x-auth-token': 'SYNTHETIC-AUTH-TOKEN', 'x-goog-api-key': 'SYNTHETIC-GOOG', cookie: 'session=SYNTHETIC', 'proxy-authorization': 'Basic SYNTHETIC' };
+  const dropped = ['authorization', ...Object.keys(creds)];
+  // paid path: the quote request and the completion both go through doorHeaders
+  const r = await s.call(MSG, { ...creds, 'x-runtime-note': 'kept' });
+  assert.equal(r.status, 200, await r.text());
+  assert.equal(s.door.st.completes.length, 1);
+  for (const h of [s.door.st.lastHeaders, s.door.st.completes[0].headers]) {
+    for (const k of dropped) assert.equal(h[k], undefined, `${k} never reaches the door`);
+    assert.equal(h['x-runtime-note'], 'kept', 'a non-credential header is forwarded as is');
+  }
+  // plain relay: a door that answers 200 straight away (the pyfile-toolkit harness shape) sees no credential either
+  const r2 = await s.call(MSG, creds, '/v1/models');
+  assert.equal(r2.status, 200, await r2.text());
+  assert.equal(s.door.st.completes.length, 1, 'a plain relay is not a paid completion');
+  assert.equal(s.door.st.served, 2);
+  for (const k of dropped) assert.equal(s.door.st.lastHeaders[k], undefined, `${k} never reaches the door on the plain relay`);
   assert.equal(s.node.st.processed.length, 1);
 });
 

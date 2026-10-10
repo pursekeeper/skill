@@ -23,8 +23,11 @@ node no-node.js receive                                   # pocket the funding s
 NANO_CAP=0.1 NANO_MAX_PER_CALL=0.01 UPSTREAM=https://nano-gpt.com/api/x402 node inference-proxy.js
 ```
 
-Then point the runtime at `http://127.0.0.1:3402/v1` with any API key; the proxy drops the key
-before the door sees it. `GET http://127.0.0.1:3402/_nano/state` shows the cap, the spend, the
+Then point the runtime at `http://127.0.0.1:3402/v1` with any API key; the proxy drops the
+runtime's credential headers (`authorization`, `proxy-authorization`, `x-api-key`, `api-key`,
+`x-auth-token`, `x-goog-api-key`, `cookie`) before the door sees them, on the paid path and on a
+plain relay alike; every other request header is forwarded as is. Until 0.2.3 only `authorization`
+and `proxy-authorization` were dropped, so a runtime sending its key as `x-api-key` forwarded it. `GET http://127.0.0.1:3402/_nano/state` shows the cap, the spend, the
 refunds pocketed, every payment's block hash and status, and the last refusals.
 
 Environment: `NANO_SEED` (required), `NANO_INDEX` (0), `UPSTREAM` (required; the one door this
@@ -37,7 +40,7 @@ pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: po
 
 ## What happens on each request
 
-1. The request is forwarded to `UPSTREAM` + path, body unchanged, `authorization` removed.
+1. The request is forwarded to `UPSTREAM` + path, body unchanged, the credential headers listed above removed.
 2. Not a 402: relayed as is (status, body, streaming included).
 3. A 402: the quote is read in one of two dialects, then one decision runs under a lock, before
    anything is signed. Every path out is a refusal to the runtime with nothing signed, or a payment:
@@ -186,13 +189,15 @@ with a fix and credit in the changelog.
 
 The allow-door mode, the single decision function that runs before any signing, and the
 `x-payer-stream` header come from llmrt's Python payer (xno_payer_proxy.py, delivered 2026-10-08),
-with credit. The offline test suite (`npm test` at the skill root, 24 cases: both dialects, cap,
+with credit. The offline test suite (`npm test` at the skill root, 25 cases: both dialects, cap,
 per-call limit, allow-list, host binding, resource binding, expiry and a missing expiry, a replayed
 payment id, malformed quotes, wrong network, restart, six parallel requests against room for two,
-stream wrapping and a wrapped tool call, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
+stream wrapping and a wrapped tool call, credential headers dropped on both paths, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
 broadcast, a refund pocketed, start-up refusals, a one-raw cap boundary) runs against a loopback
 door and a loopback node that verifies every signature and frontier. Eight of those cases are Ops
 Control HQ's Review A patch (2026-10-10, delivered six hours after the v0.2.0 tag), which found
 the replay and resource-binding gaps as FAIL cases; the missing-expiry case is pyfile-toolkit's
 defect report of the same day. All three are fixed in 0.2.1. The wrapped tool-call case is
-pyfile-toolkit's second report, 100 minutes after the v0.2.1 tag, fixed in 0.2.2.
+pyfile-toolkit's second report, 100 minutes after the v0.2.1 tag, fixed in 0.2.2. The
+credential-header case is their third, 27 minutes after the v0.2.2 tag: this page promised that
+the runtime's key never reaches the door, and a key sent as `x-api-key` did. Fixed in 0.2.3.

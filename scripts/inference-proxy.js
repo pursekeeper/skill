@@ -270,7 +270,11 @@ function decide(q) {
 }
 
 // ---- HTTP plumbing ----
-const HOP = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'content-length', 'authorization', 'proxy-authorization', 'payment-signature', 'x-payment', 'x-nano-represent', 'x-x402', 'x-x402-payment-id']);
+// Runtime credential headers are dropped before the door sees them: the runtime is told to use "any API key"
+// and the proxy is the one paying. Until 0.2.3 only authorization and proxy-authorization were dropped, so a
+// runtime that sends its key as x-api-key forwarded it verbatim (pyfile-toolkit, api#89, 2026-10-10).
+const CREDENTIAL = ['authorization', 'proxy-authorization', 'x-api-key', 'api-key', 'x-auth-token', 'x-goog-api-key', 'cookie'];
+const HOP = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'content-length', ...CREDENTIAL, 'payment-signature', 'x-payment', 'x-nano-represent', 'x-x402', 'x-x402-payment-id']);
 function doorHeaders(req, extra) {
   const h = {};
   for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k)) h[k] = Array.isArray(v) ? v.join(', ') : v;
