@@ -3,7 +3,7 @@
   "private": true,
   "description": "Offline regression tests for the pursekeeper skill scripts",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/index.js test/inference-proxy.js"
   },
   "devDependencies": {
     "nanocurrency": "2.5.0"
