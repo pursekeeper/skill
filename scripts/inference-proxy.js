@@ -243,7 +243,25 @@ function decide(q) {
       if (h !== cfg.host) throw new Refuse('host_mismatch', { field: k, host: h, upstream: cfg.host });
     }
     if (!q.paymentId) throw new Refuse('malformed_quote', { field: 'paymentId' });
-    if (q.expiresAt) { const t = Date.parse(q.expiresAt); if (!Number.isFinite(t) || t < Date.now() + 5000) throw new Refuse('quote_expired', { expiresAt: q.expiresAt }); }
+    // One payment id is paid at most once by this state file. A repeated id is a replay whatever the door says, and an
+    // in-flight entry counts too, so two parallel requests cannot both pay it (Ops Control HQ, Review A case A11, 2026-10-10).
+    const prior = state.payments.find(p => p.paymentId && p.paymentId === q.paymentId && p.status !== 'not_broadcast');
+    if (prior) throw new Refuse('paymentid_replayed', { paymentId: q.paymentId, hash: prior.hash, status: prior.status });
+    // expiresAt is required, not optional: until 0.2.1 a quote without one skipped the check and was paid (pyfile-toolkit, 2026-10-10).
+    if (q.expiresAt === undefined || q.expiresAt === null || q.expiresAt === '') throw new Refuse('malformed_quote', { field: 'expiresAt' });
+    const t = Date.parse(String(q.expiresAt));
+    if (!Number.isFinite(t) || t < Date.now() + 5000) throw new Refuse('quote_expired', { expiresAt: q.expiresAt });
+  }
+  if (q.kind === 'exact') {
+    // The resource the quote names (x402 v2: top-level `resource`, a string or {url}; v1 shape: accepts[].resource) must be on
+    // the door's host when present. A quote for a resource elsewhere is not this door's quote and is refused before signing
+    // (Ops Control HQ, Review A cases A06/A07, 2026-10-10).
+    for (const [k, v] of [['resource', q.pr && q.pr.resource], ['accepts.resource', q.accepted && q.accepted.resource]]) {
+      if (v === undefined || v === null) continue;
+      const u = typeof v === 'object' ? v.url : v;
+      let h; try { h = new URL(String(u)).host; } catch { throw new Refuse('malformed_quote', { field: k }); }
+      if (h !== cfg.host) throw new Refuse('resource_mismatch', { field: k, host: h, upstream: cfg.host });
+    }
   }
   if (cfg.allow.length && !cfg.allow.includes(q.payTo)) throw new Refuse('payto_not_allowed', { payTo: q.payTo });
   if (amount > cfg.perCall) throw new Refuse('over_per_call_limit', { amount: fmt(amount), limit: fmt(cfg.perCall) });

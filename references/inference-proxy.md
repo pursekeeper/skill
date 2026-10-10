@@ -43,7 +43,12 @@ pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: po
    anything is signed. Every path out is a refusal to the runtime with nothing signed, or a payment:
    - the quote's `payTo` is a valid account and `amount` a positive integer in raw;
    - NanoGPT dialect: `completeUrl` and `statusUrl` are on the `UPSTREAM` host, a `paymentId`
-     exists, `expiresAt` is at least 5 s away;
+     exists and has not been paid before by this state file (a repeated id is a replay, refused
+     `paymentid_replayed`), `expiresAt` is present and at least 5 s away (a quote without one is
+     `malformed_quote`; until 0.2.1 a missing field skipped the check);
+   - exact dialect: the quote's `resource` (top-level, a string or `{url}`, or on the accepted
+     option) is on the `UPSTREAM` host when present; one for another origin is refused
+     `resource_mismatch` before signing;
    - `payTo` is on `NANO_ALLOW_PAYTO` when that is set;
    - `amount` is at most `NANO_MAX_PER_CALL`;
    - spent so far plus `amount` is at most `NANO_CAP`;
@@ -69,8 +74,8 @@ pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: po
 
 Refusals answer HTTP 402 with `{"error":{"type":"nano_payer_refused","code":...},"payer":{...}}` and
 an `x-payer-refused` header: `cap_exceeded`, `over_per_call_limit`, `payto_not_allowed`,
-`host_mismatch`, `quote_expired`, `malformed_quote`, `no_nano_option`, `insufficient_balance`,
-`account_not_opened`, `broadcast_failed`. A door that cannot be reached, or a paid call the door did
+`host_mismatch`, `resource_mismatch`, `quote_expired`, `malformed_quote`, `paymentid_replayed`,
+`no_nano_option`, `insufficient_balance`, `account_not_opened`, `broadcast_failed`. A door that cannot be reached, or a paid call the door did
 not serve, answers 502 with the hash and payment id so the call can be completed by hand within the
 quote's life (NanoGPT: 15 minutes, same body, same payment id).
 
@@ -177,7 +182,12 @@ with a fix and credit in the changelog.
 
 The allow-door mode, the single decision function that runs before any signing, and the
 `x-payer-stream` header come from llmrt's Python payer (xno_payer_proxy.py, delivered 2026-10-08),
-with credit. The offline test suite (`npm test` at the skill root, 13 cases: both dialects, cap,
-per-call limit, allow-list, host binding, expiry, malformed quotes, restart, six parallel requests
-against room for two, stream wrapping, a rejected broadcast, a refund pocketed, start-up refusals)
-runs against a loopback door and a loopback node that verifies every signature and frontier.
+with credit. The offline test suite (`npm test` at the skill root, 23 cases: both dialects, cap,
+per-call limit, allow-list, host binding, resource binding, expiry and a missing expiry, a replayed
+payment id, malformed quotes, wrong network, restart, six parallel requests against room for two,
+stream wrapping, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
+broadcast, a refund pocketed, start-up refusals, a one-raw cap boundary) runs against a loopback
+door and a loopback node that verifies every signature and frontier. Eight of those cases are Ops
+Control HQ's Review A patch (2026-10-10, delivered six hours after the v0.2.0 tag), which found
+the replay and resource-binding gaps as FAIL cases; the missing-expiry case is pyfile-toolkit's
+defect report of the same day. All three are fixed in 0.2.1.

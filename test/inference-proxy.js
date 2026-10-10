@@ -21,11 +21,11 @@ const readBody = req => new Promise((res, rej) => { let t = ''; req.on('data', c
 
 // ---- mock node: one account, balance and frontier tracked, blocks verified ----
 function mockNode(account, publicKey, initial) {
-  const st = { frontier: 'A'.repeat(64), balance: initial, processed: [], receivable: {}, rejectNext: 0, workCalls: 0 };
+  const st = { frontier: 'A'.repeat(64), balance: initial, processed: [], receivable: {}, rejectNext: 0, lostReplyNext: 0, accountError: null, workCalls: 0 };
   const srv = createServer(async (req, res) => {
     const b = JSON.parse(await readBody(req) || '{}');
     const out = o => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
-    if (b.action === 'account_info') return out({ frontier: st.frontier, balance: st.balance.toString(), representative: account });
+    if (b.action === 'account_info') return st.accountError ? out({ error: st.accountError }) : out({ frontier: st.frontier, balance: st.balance.toString(), representative: account });
     if (b.action === 'work_generate') { st.workCalls++; return out({ work: WORK }); }
     if (b.action === 'receivable') return out({ blocks: st.receivable });
     if (b.action === 'block_info') return st.processed.some(p => p.hash === b.hash) ? out({ contents: {} }) : out({ error: 'Block not found' });
@@ -47,6 +47,7 @@ function mockNode(account, publicKey, initial) {
         st.processed.push({ hash, subtype: b.subtype, amount: bal - st.balance });
       }
       st.balance = bal; st.frontier = hash;
+      if (st.lostReplyNext > 0) { st.lostReplyNext--; return out({ error: 'timeout after accept' }); }
       return out({ hash });
     }
     out({ error: 'unknown action ' + b.action });
@@ -91,8 +92,8 @@ function mockDoor(node, opts) {
     const payTo = opts.payTo || N.deriveAddress(N.derivePublicKey(randomBytes(32).toString('hex')), { useNanoPrefix: true });
     if (st.mode === 'exact') {
       const sig = req.headers['payment-signature'];
-      const accepts = [{ scheme: 'exact', network: 'nano:mainnet', amount: String(st.amount), payTo, resource: `http://${host}${req.url}` }];
-      if (!sig) return out(402, { 'payment-required': Buffer.from(JSON.stringify({ x402Version: 2, resource: `http://${host}${req.url}`, accepts })).toString('base64') }, '{"error":"payment required"}');
+      const accepts = [{ scheme: 'exact', network: opts.network || 'nano:mainnet', amount: String(st.amount), payTo, resource: opts.resource || `http://${host}${req.url}` }];
+      if (!sig) return out(402, { 'payment-required': Buffer.from(JSON.stringify({ x402Version: 2, resource: opts.resourceTop || `http://${host}${req.url}`, accepts })).toString('base64') }, '{"error":"payment required"}');
       const p = JSON.parse(Buffer.from(sig, 'base64').toString());
       const blk = p.payload.block;
       // the seller broadcasts
@@ -102,12 +103,13 @@ function mockDoor(node, opts) {
       return serve();
     }
     // nano dialect
-    const id = 'pay_' + randomBytes(6).toString('hex');
+    const id = opts.fixedId || ('pay_' + randomBytes(6).toString('hex'));
     const base = opts.completeHost ? `http://${opts.completeHost}` : `http://${host}`;
-    const a = { scheme: 'nano', protocolScheme: 'nano', network: 'nano-mainnet', amount: String(st.amount), payTo, paymentId: id,
+    const a = { scheme: 'nano', protocolScheme: 'nano', network: opts.network || 'nano-mainnet', amount: String(st.amount), payTo, paymentId: id,
       expiresAt: opts.expired ? new Date(Date.now() - 1000).toISOString() : new Date(Date.now() + 900000).toISOString(), statusUrl: `${base}/status/${id}`, completeUrl: `${base}/complete/${id}` };
     if (opts.malformed === 'amount') a.amount = 'abc';
     if (opts.malformed === 'zero') a.amount = '0';
+    if (opts.noExpiry) delete a.expiresAt;
     st.quotes[id] = { payTo, amount: a.amount, body };
     out(402, { 'x-payment-schemes': 'nano,nano-exact' }, JSON.stringify({ error: { message: 'Insufficient balance', code: 'insufficient_quota' }, payment: { version: 1, paymentId: id, accepted: [a, { scheme: 'nano-exact', network: 'nano:mainnet', amount: a.amount, payTo }] } }));
   });
@@ -314,4 +316,102 @@ test('refuses to start without a cap, without an upstream, or with a state file 
     const code = await new Promise(r => spawn(process.execPath, [SCRIPT], { env: { PATH: process.env.PATH, HOME: dir, STATE_FILE: join(dir, 's.json'), ...env }, stdio: 'ignore' }).on('exit', r));
     assert.equal(code, 2, JSON.stringify(env));
   }
+});
+
+test('raw-unit cap boundary: one raw pays exactly once and the next identical quote is refused', async t => {
+  const oneRawXno = '0.' + '0'.repeat(29) + '1';
+  const s = await stand(t, { mode: 'nano', amount: 1n }, { NANO_CAP: oneRawXno, NANO_MAX_PER_CALL: oneRawXno });
+  assert.equal((await s.call(MSG)).status, 200);
+  const second = await s.call(MSG);
+  assert.equal(second.status, 402);
+  assert.equal((await second.json()).payer.code, 'cap_exceeded');
+  assert.equal(s.node.st.processed.length, 1);
+  assert.equal(s.node.st.processed[0].amount, 1n);
+  assert.equal((await s.stateOf()).spent, oneRawXno);
+});
+
+test('replayed NanoGPT paymentId: the second quote with the same id is refused before work or signing (Ops Control HQ, Review A case A11)', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI, fixedId: 'pay_replayed' });
+  assert.equal((await s.call(MSG)).status, 200);
+  const work1 = s.node.st.workCalls;
+  const second = await s.call(MSG);
+  assert.equal(second.status, 402);
+  const j = await second.json();
+  assert.equal(j.payer.code, 'paymentid_replayed');
+  assert.equal(j.payer.detail.paymentId, 'pay_replayed');
+  assert.equal(s.node.st.processed.length, 1, 'exactly one send for one payment id');
+  assert.equal(s.node.st.workCalls, work1, 'no work requested for the replay');
+  assert.equal((await s.stateOf()).spent, '0.001');
+});
+
+test('exact quote whose accepts[].resource is on another origin is refused before work or signing (Ops Control HQ, Review A cases A06/A07)', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, resource: 'https://unapproved.example/v1/chat/completions' });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'resource_mismatch');
+  assert.equal(j.payer.detail.field, 'accepts.resource');
+  assert.equal(j.payer.detail.host, 'unapproved.example');
+  assert.equal(s.node.st.processed.length, 0, 'nothing broadcast');
+  assert.equal(s.node.st.workCalls, 0, 'no work requested');
+  assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('exact quote whose top-level resource {url} is on another origin is refused before work or signing', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, resourceTop: { url: 'https://unapproved.example/v1/chat/completions', description: 'x' } });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'resource_mismatch');
+  assert.equal(j.payer.detail.field, 'resource');
+  assert.equal(s.node.st.processed.length, 0);
+  assert.equal(s.node.st.workCalls, 0);
+  assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('nano quote without expiresAt is refused as malformed before work or signing (pyfile-toolkit, 2026-10-10)', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI, noExpiry: true });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'malformed_quote');
+  assert.equal(j.payer.detail.field, 'expiresAt');
+  assert.equal(s.node.st.processed.length, 0);
+  assert.equal(s.node.st.workCalls, 0);
+  assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('wrong Nano network is refused before work, signing, or broadcast in both dialects', async t => {
+  for (const mode of ['nano', 'exact']) {
+    const s = await stand(t, { mode, amount: MILLI, network: 'nano:testnet' });
+    const r = await s.call(MSG);
+    assert.equal(r.status, 402);
+    assert.equal((await r.json()).payer.code, 'no_nano_option');
+    assert.equal(s.node.st.workCalls, 0);
+    assert.equal(s.node.st.processed.length, 0);
+    assert.equal((await s.stateOf()).spent, '0');
+  }
+});
+
+test('RPC account error before submit refuses without work, signing, or broadcast', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI });
+  s.node.st.accountError = 'upstream timeout';
+  const r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  assert.equal((await r.json()).payer.code, 'account_unreadable');
+  assert.equal(s.node.st.workCalls, 0);
+  assert.equal(s.node.st.processed.length, 0);
+  assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('accepted broadcast with lost RPC reply is reconciled once and never paid twice', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI });
+  s.node.st.lostReplyNext = 1;
+  const r = await s.call(MSG);
+  assert.equal(r.status, 200);
+  assert.equal(s.node.st.processed.length, 1);
+  const st = await s.stateOf();
+  assert.equal(st.spent, '0.001');
+  assert.equal(st.payments.length, 1);
+  assert.equal(st.payments[0].status, 'served');
 });
