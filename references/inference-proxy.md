@@ -88,7 +88,11 @@ belongs to another account is refused. To reset the count, the operator deletes 
 
 `stream:true` is forwarded. The door's SSE is piped as it arrives, `x-payer-stream: passthrough`. A
 door that answers a stream request with a plain completion gets wrapped as one
-`chat.completion.chunk` plus `[DONE]`, `x-payer-stream: buffered`. Measured at NanoGPT on 2026-10-10
+`chat.completion.chunk` plus `[DONE]`, `x-payer-stream: buffered`. That one chunk's `delta` is the
+whole message: `content`, `tool_calls` (each with its `index`, as the chunk schema has it), `refusal`
+and any other field the door put in `message`. Until 0.2.2 only `content` was carried, so a tool-call
+answer arrived as `finish_reason: "tool_calls"` with no call in it (pyfile-toolkit, api#89,
+2026-10-10, reproduced from the v0.2.1 tag with their harness). Measured at NanoGPT on 2026-10-10
 from this box, gpt-5-nano, after the payment handshake:
 
 | call | paid (XNO) | headers after | chunks | first chunk | last chunk |
@@ -182,12 +186,13 @@ with a fix and credit in the changelog.
 
 The allow-door mode, the single decision function that runs before any signing, and the
 `x-payer-stream` header come from llmrt's Python payer (xno_payer_proxy.py, delivered 2026-10-08),
-with credit. The offline test suite (`npm test` at the skill root, 23 cases: both dialects, cap,
+with credit. The offline test suite (`npm test` at the skill root, 24 cases: both dialects, cap,
 per-call limit, allow-list, host binding, resource binding, expiry and a missing expiry, a replayed
 payment id, malformed quotes, wrong network, restart, six parallel requests against room for two,
-stream wrapping, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
+stream wrapping and a wrapped tool call, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
 broadcast, a refund pocketed, start-up refusals, a one-raw cap boundary) runs against a loopback
 door and a loopback node that verifies every signature and frontier. Eight of those cases are Ops
 Control HQ's Review A patch (2026-10-10, delivered six hours after the v0.2.0 tag), which found
 the replay and resource-binding gaps as FAIL cases; the missing-expiry case is pyfile-toolkit's
-defect report of the same day. All three are fixed in 0.2.1.
+defect report of the same day. All three are fixed in 0.2.1. The wrapped tool-call case is
+pyfile-toolkit's second report, 100 minutes after the v0.2.1 tag, fixed in 0.2.2.

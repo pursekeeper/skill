@@ -30,7 +30,7 @@
 // (hashes only; the seed never leaves this process and the signed-but-unbroadcast payloads stay in
 // the state file, mode 600). Streaming: stream:true is forwarded; the door's SSE is piped as it
 // arrives (x-payer-stream: passthrough); a JSON answer to a stream request is wrapped as one SSE
-// chunk plus [DONE] (x-payer-stream: buffered). Only dependency: nanocurrency (npm i nanocurrency).
+// chunk plus [DONE] carrying the whole message, tool_calls included (x-payer-stream: buffered). Only dependency: nanocurrency (npm i nanocurrency).
 //
 // The allow-door mode, the single decision function that runs before any signing, and the
 // x-payer-stream header are taken from llmrt's Python payer (xno_payer_proxy.py, 2026-10-08), with credit.
@@ -286,6 +286,15 @@ function refuse(res, status, code, detail, extra) {
   res.writeHead(status, { 'content-type': 'application/json', 'x-payer-refused': code });
   res.end(JSON.stringify({ error: { message: `inference-proxy refused: ${code} ${JSON.stringify(detail || {})}`, type: 'nano_payer_refused', code }, payer: { code, detail, ...extra } }));
 }
+// The whole message becomes the one delta: content, tool_calls (each with its index, as the chunk schema has it),
+// refusal and whatever else the door put there. Until 0.2.2 only content was carried, so a tool-call answer
+// arrived as finish_reason tool_calls with no call in it (pyfile-toolkit, api#89, 2026-10-10).
+function asDelta(m) {
+  const { role, content, tool_calls, ...rest } = m || {};
+  const d = { role: role || 'assistant', content: content == null ? '' : content, ...rest };
+  if (Array.isArray(tool_calls)) d.tool_calls = tool_calls.map((t, i) => ({ index: i, ...t }));
+  return d;
+}
 async function relay(res, r, wantStream, extra) {
   const h = { ...extra };
   for (const k of PASS) if (r.headers.get(k)) h[k] = r.headers.get(k);
@@ -298,7 +307,7 @@ async function relay(res, r, wantStream, extra) {
     res.writeHead(r.status, h);
     if (j && Array.isArray(j.choices)) {
       const chunk = { id: j.id, object: 'chat.completion.chunk', created: j.created, model: j.model, usage: j.usage,
-        choices: j.choices.map(c => ({ index: c.index, delta: { role: 'assistant', content: (c.message && c.message.content) || '' }, finish_reason: c.finish_reason || 'stop' })) };
+        choices: j.choices.map(c => ({ index: c.index, delta: asDelta(c.message), finish_reason: c.finish_reason || 'stop' })) };
       res.write('data: ' + JSON.stringify(chunk) + '\n\n');
     } else res.write('data: ' + text.replace(/\n/g, ' ') + '\n\n');
     res.end('data: [DONE]\n\n');

@@ -70,7 +70,7 @@ function mockDoor(node, opts) {
         res.write('data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OK"}}]}\n\n');
         return res.end('data: [DONE]\n\n');
       }
-      out(200, { 'x-x402-reconciliation-amount': '0.000001' }, JSON.stringify({ id: 'c1', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { total_tokens: 2 } }));
+      out(200, { 'x-x402-reconciliation-amount': '0.000001' }, JSON.stringify(opts.completion || { id: 'c1', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { total_tokens: 2 } }));
     };
     if (req.url.startsWith('/status/')) {
       const q = st.quotes[req.url.slice('/status/'.length)];
@@ -248,6 +248,29 @@ test('stream:true: SSE from the door is passed through; a JSON answer is wrapped
   assert.match(text, /chat\.completion\.chunk/);
   assert.match(text, /"delta":\{"role":"assistant","content":"OK"\}/);
   assert.match(text, /data: \[DONE\]\n\n$/);
+});
+
+test('stream:true buffered wrap keeps tool_calls (with index), refusal and any other message field (pyfile-toolkit, api#89 slot 2)', async t => {
+  const tool_calls = [{ id: 'call_1', type: 'function', function: { name: 'get_balance', arguments: '{"asset":"XNO"}' } }];
+  const completion = { id: 'c2', object: 'chat.completion', created: 1, model: 'm', usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+    choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls, refusal: null }, finish_reason: 'tool_calls' }] };
+  const s = await stand(t, { mode: 'nano', amount: MILLI, sse: false, completion });
+  const r = await s.call({ ...MSG, stream: true });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-payer-stream'), 'buffered');
+  const text = await r.text();
+  const frames = text.split('\n\n').filter(Boolean);
+  assert.equal(frames.length, 2);
+  assert.equal(frames[1], 'data: [DONE]');
+  const first = JSON.parse(frames[0].replace(/^data: /, ''));
+  assert.equal(first.object, 'chat.completion.chunk');
+  assert.equal(first.choices[0].finish_reason, 'tool_calls');
+  const d = first.choices[0].delta;
+  assert.equal(d.role, 'assistant');
+  assert.equal(d.content, '');
+  assert.deepEqual(d.tool_calls, [{ index: 0, ...tool_calls[0] }]);
+  assert.equal(d.refusal, null);
+  assert.equal(s.node.st.processed.length, 1);
 });
 
 test('exact dialect: signed block in PAYMENT-SIGNATURE, seller broadcasts, spend counted', async t => {
