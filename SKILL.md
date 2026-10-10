@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.1.14
+version: 0.2.0
 metadata:
   openclaw:
     requires:
@@ -13,6 +13,12 @@ metadata:
       - name: NANO_MAX_PAY
         required: false
         description: Spending cap for scripts/client-x402.js in NANO as decimal text (0.05, 1, 0.000001), default 0.01. A 402 quote above it is refused and nothing is signed. Anything that is not a decimal amount falls back to 0.01 with a warning. Raise it on purpose, per run.
+      - name: NANO_CAP
+        required: false
+        description: Cumulative spending cap for scripts/inference-proxy.js in NANO as decimal text, over the life of its state file. The proxy refuses to start without it.
+      - name: UPSTREAM
+        required: false
+        description: The one door scripts/inference-proxy.js may pay, e.g. https://nano-gpt.com/api/x402. Quotes whose status or complete URLs sit on another host are refused.
     emoji: "👛"
     homepage: https://pursekeeper.dev
 ---
@@ -120,6 +126,25 @@ there unpocketed.
 **Per-order address, flat body** (llmrt and similar): the 402 names `nano_address` and
 `nano_amount_raw`; send exactly that with `no-node.js send`, then retry the request or
 poll the order URL the body gives you. 1 XNO = 10^30 raw.
+
+## 3a. Pay for your own model calls in Nano (the wallet is the budget)
+
+If your operator funds your wallet, your thinking can be paid per call from it, with no account at
+the model provider and a cap you cannot exceed:
+
+```bash
+cd <this skill's folder>/scripts
+NANO_CAP=0.1 NANO_MAX_PER_CALL=0.01 UPSTREAM=https://nano-gpt.com/api/x402 node inference-proxy.js
+# then set your runtime's OpenAI-compatible base URL to http://127.0.0.1:3402/v1 (any API key)
+curl -s http://127.0.0.1:3402/_nano/state        # cap, spent, refunds, every payment's block hash
+```
+
+Each request is forwarded to NanoGPT's accountless door; its 402 quote is checked (door host, per-call
+limit, cumulative cap, expiry) before anything is signed, the send is broadcast, the call completed,
+and the unused part of the quote comes back on-chain and is pocketed. A quote that fails any check is
+refused with nothing signed. Works with `stream:true`. Verified with OpenClaw 2026.10.1-beta: the
+provider entry, the command and the costs observed are in `references/inference-proxy.md`. The same
+proxy pays x402 `exact` doors on `nano:mainnet` when `UPSTREAM` points at one.
 
 ## 4. Sell for it
 
