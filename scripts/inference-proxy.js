@@ -3,7 +3,7 @@
 // the agent's own wallet, inside a cumulative cap the operator set before starting it.
 //
 //   NANO_SEED=<64 hex> NANO_CAP=0.1 UPSTREAM=https://nano-gpt.com/api/x402 node inference-proxy.js
-//   then point the runtime at http://127.0.0.1:3402/v1 with any API key (the key is dropped here).
+//   then point the runtime at http://127.0.0.1:3402/v1 with PROXY_KEY as its API key (checked, then dropped here).
 //
 // What it does: every request to /v1/* is forwarded to UPSTREAM/v1/* unchanged. When the door answers
 // 402, the proxy reads the quote, decides under a lock whether it may pay (door host bound at setup,
@@ -16,6 +16,9 @@
 // Anything else, and any check that fails, ends in a refusal to the runtime with nothing signed.
 //
 // Env: NANO_SEED (required), NANO_INDEX (default 0),
+//      PROXY_KEY (required, 16+ characters; every /v1/* request must carry it as "Authorization: Bearer <key>"
+//                 or "x-api-key: <key>", else 401 with nothing forwarded or signed; the proxy binds loopback,
+//                 but loopback is shared with every process and every browser tab on the machine),
 //      UPSTREAM (required; the one door this instance may pay, e.g. https://nano-gpt.com/api/x402),
 //      NANO_CAP (required; cumulative cap in XNO as decimal text, over the life of the state file),
 //      NANO_MAX_PER_CALL (default 0.001 XNO; a quote above it is refused),
@@ -26,6 +29,8 @@
 //      NANO_RPC (optional node RPC; else the free endpoints at API, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint; else API /v1/work, else local CPU, slow),
 //      RECEIVE (default 1: pocket refunds and other receivables before a paid call; 0 to skip).
+// Every request must name a loopback Host (127.0.0.1, localhost, [::1]) and carry no Origin header, so a web page
+// the operator's browser opens cannot reach the wallet by a no-preflight POST or by DNS rebinding (403).
 // Endpoints: ANY /v1/* forwarded and paid; GET /_nano/state for the cap, spend and payment list
 // (hashes only; the seed never leaves this process and the signed-but-unbroadcast payloads stay in
 // the state file, mode 600). Streaming: stream:true is forwarded; the door's SSE is piped as it
@@ -40,6 +45,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const N = require('nanocurrency');
+const { createHash, timingSafeEqual } = require('node:crypto');
 
 const RAW = 10n ** 30n;
 const ZERO = '0'.repeat(64);
@@ -54,6 +60,8 @@ const log = (...a) => console.error(new Date().toISOString(), ...a);
 const cfg = (() => {
   const die = m => { console.error('inference-proxy: ' + m); process.exit(2); };
   if (!/^[0-9a-fA-F]{64}$/.test(process.env.NANO_SEED || '')) die('set NANO_SEED (64 hex characters)');
+  const proxyKey = (process.env.PROXY_KEY || '').trim();
+  if (proxyKey.length < 16) die('set PROXY_KEY (16+ characters, e.g. $(openssl rand -hex 16)); the runtime presents it as "Authorization: Bearer <key>" or "x-api-key: <key>", and nothing without it is forwarded or paid');
   const upstream = (process.env.UPSTREAM || '').replace(/\/+$/, '');
   let u; try { u = new URL(upstream); } catch { die('set UPSTREAM to the door this proxy may pay, e.g. https://nano-gpt.com/api/x402'); }
   if (u.protocol !== 'https:' && u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') die('UPSTREAM must be https (or loopback for tests)');
@@ -64,10 +72,12 @@ const cfg = (() => {
   const allow = (process.env.NANO_ALLOW_PAYTO || '').split(',').map(s => s.trim()).filter(Boolean);
   for (const a of allow) if (!N.checkAddress(a)) die('NANO_ALLOW_PAYTO: not a Nano address: ' + a);
   const port = Number(process.env.PORT || 3402);
+  const keyHash = createHash('sha256').update(proxyKey).digest();
   const sk = N.deriveSecretKey(process.env.NANO_SEED, Number(process.env.NANO_INDEX || 0));
   const pub = N.derivePublicKey(sk);
   const account = N.deriveAddress(pub, { useNanoPrefix: true });
   return {
+    keyHash,
     upstream, host: u.host, cap, perCall, allow, port, sk, pub, account,
     state: process.env.STATE_FILE || path.join(os.homedir(), '.pursekeeper', `inference-proxy-${port}.json`),
     rpc: process.env.NANO_RPC || null,
@@ -324,13 +334,34 @@ async function relay(res, r, wantStream, extra) {
   res.end();
 }
 
+// Loopback is shared with every process and every browser tab on the machine. Before anything is read, counted
+// or signed: the Host must be a loopback name (a page that rebinds its DNS to 127.0.0.1 arrives with its own
+// host name), no Origin header (a browser sets one on every cross-site request, including the no-preflight
+// POSTs a page may send to 127.0.0.1), and /v1/* must carry PROXY_KEY (a page cannot set Authorization or
+// x-api-key without a preflight, which the proxy never answers).
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+function gate(req) {
+  const host = String(req.headers.host || '').trim().toLowerCase().replace(/:\d+$/, '');
+  if (!LOOPBACK.has(host)) return { status: 403, code: 'host_not_loopback', detail: { host: req.headers.host || null } };
+  if (req.headers.origin !== undefined) return { status: 403, code: 'browser_origin', detail: { origin: String(req.headers.origin).slice(0, 200) } };
+  return null;
+}
+const keyMatches = v => { if (typeof v !== 'string' || !v) return false; return timingSafeEqual(createHash('sha256').update(v.trim()).digest(), cfg.keyHash); };
+function keyPresented(req) {
+  const a = req.headers.authorization, m = typeof a === 'string' ? /^Bearer\s+(.+)$/i.exec(a.trim()) : null;
+  return keyMatches(m && m[1]) || keyMatches(req.headers['x-api-key']);
+}
+
 async function handle(req, res) {
+  const g = gate(req);
+  if (g) return refuse(res, g.status, g.code, g.detail);
   if (req.method === 'GET' && req.url === '/_nano/state') {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ account: cfg.account, upstream: cfg.upstream, cap: fmt(cfg.cap), per_call_limit: fmt(cfg.perCall), spent: fmt(spent()), remaining: fmt(cfg.cap - spent()), received: fmt(state.received_raw),
       calls: state.calls, paid: state.paid, refused: state.refused, allow_payto: cfg.allow, refusals: (state.refusals || []).slice(-10), payments: state.payments.slice(-50).map(p => ({ ...p, payload: undefined })), receipts: state.receipts.slice(-20) }, null, 1));
   }
   if (!req.url.startsWith('/v1/')) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"only /v1/* is forwarded"}'); }
+  if (!keyPresented(req)) return refuse(res, 401, 'proxy_key', { presented: ['authorization', 'x-api-key'].filter(h => req.headers[h] !== undefined), hint: 'send PROXY_KEY as "Authorization: Bearer <key>" or "x-api-key: <key>"' });
   state.calls++;
   const chunks = []; let size = 0;
   for await (const c of req) { size += c.length; if (size > 4 << 20) { res.writeHead(413); return res.end(); } chunks.push(c); }
@@ -428,5 +459,5 @@ async function handle(req, res) {
 const server = http.createServer((req, res) => handle(req, res).catch(e => { log('handler error: ' + (e.stack || e.message)); if (!res.headersSent) refuse(res, 500, 'internal', { error: e.message }); else res.end(); }));
 server.listen(cfg.port, '127.0.0.1', () => {
   persist();
-  log(`inference-proxy on http://127.0.0.1:${server.address().port}/v1 -> ${cfg.upstream}; paying from ${cfg.account}; cap ${fmt(cfg.cap)} XNO (spent ${fmt(spent())}), per call ${fmt(cfg.perCall)}; state ${cfg.state}`);
+  log(`inference-proxy on http://127.0.0.1:${server.address().port}/v1 -> ${cfg.upstream}; paying from ${cfg.account}; cap ${fmt(cfg.cap)} XNO (spent ${fmt(spent())}), per call ${fmt(cfg.perCall)}; PROXY_KEY set; state ${cfg.state}`);
 });

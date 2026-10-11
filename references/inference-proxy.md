@@ -20,26 +20,39 @@ cd <this skill's folder>/scripts && npm install          # nanocurrency, the onl
 export NANO_SEED=$(openssl rand -hex 32)                  # or the seed of the wallet you funded; 600-mode file, never a log
 node no-node.js address                                   # fund this address; ~0.01 XNO covers hundreds of small-model calls
 node no-node.js receive                                   # pocket the funding send (opens the account)
+export PROXY_KEY=$(openssl rand -hex 16)                  # the runtime presents this as its API key; nothing without it is paid
 NANO_CAP=0.1 NANO_MAX_PER_CALL=0.01 UPSTREAM=https://nano-gpt.com/api/x402 node inference-proxy.js
 ```
 
-Then point the runtime at `http://127.0.0.1:3402/v1` with any API key; the proxy drops the
+Then point the runtime at `http://127.0.0.1:3402/v1` with `PROXY_KEY` as its API key
+(`Authorization: Bearer <key>` or `x-api-key: <key>`; a `/v1/*` request without it is refused 401
+with nothing forwarded or signed; until 0.3.0 any key was accepted). The proxy drops the
 runtime's credential headers (`authorization`, `proxy-authorization`, `x-api-key`, `api-key`,
 `x-auth-token`, `x-goog-api-key`, `cookie`) before the door sees them, on the paid path and on a
 plain relay alike; every other request header is forwarded as is. Until 0.2.3 only `authorization`
 and `proxy-authorization` were dropped, so a runtime sending its key as `x-api-key` forwarded it. `GET http://127.0.0.1:3402/_nano/state` shows the cap, the spend, the
 refunds pocketed, every payment's block hash and status, and the last refusals.
 
-Environment: `NANO_SEED` (required), `NANO_INDEX` (0), `UPSTREAM` (required; the one door this
+Environment: `NANO_SEED` (required), `NANO_INDEX` (0), `PROXY_KEY` (required, 16+ characters; the
+runtime's API key for this proxy), `UPSTREAM` (required; the one door this
 instance may pay), `NANO_CAP` (required; cumulative, XNO as decimal text, over the life of the state
 file), `NANO_MAX_PER_CALL` (0.001), `NANO_ALLOW_PAYTO` (optional comma list; NanoGPT issues a fresh
 deposit account per payment, so leave it unset there), `STATE_FILE`
-(`~/.pursekeeper/inference-proxy-<port>.json`), `PORT` (3402, loopback only), `NANO_RPC` (a node, else
+(`~/.pursekeeper/inference-proxy-<port>.json`), `PORT` (3402; the proxy binds 127.0.0.1 only, and loopback is shared with every process and browser
+tab on the machine, which is what `PROXY_KEY` and the checks below are for), `NANO_RPC` (a node, else
 pursekeeper.dev's free endpoints), `WORK_URL` (an RPC-style `work_generate` endpoint, else
 pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: pocket refunds before a paid call).
 
 ## What happens on each request
 
+0. Before anything is read, counted or signed: the `Host` header must be a loopback name
+   (`127.0.0.1`, `localhost`, `[::1]`, with or without a port; a web page that rebinds its DNS to
+   127.0.0.1 arrives with its own host name and is refused 403 `host_not_loopback`), there must be
+   no `Origin` header (a browser sets one on every cross-site request, including the no-preflight
+   POSTs a page may send to 127.0.0.1; refused 403 `browser_origin`), and a `/v1/*` request must
+   carry `PROXY_KEY` (a page cannot set `Authorization` or `x-api-key` without a CORS preflight,
+   which the proxy never answers; refused 401 `proxy_key`). These three are what stands between
+   the wallet and anything else on the machine that can open a TCP connection to loopback.
 1. The request is forwarded to `UPSTREAM` + path, body unchanged, the credential headers listed above removed.
 2. Not a 402: relayed as is (status, body, streaming included).
 3. A 402: the quote is read in one of two dialects, then one decision runs under a lock, before
@@ -78,7 +91,8 @@ pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: po
 Refusals answer HTTP 402 with `{"error":{"type":"nano_payer_refused","code":...},"payer":{...}}` and
 an `x-payer-refused` header: `cap_exceeded`, `over_per_call_limit`, `payto_not_allowed`,
 `host_mismatch`, `resource_mismatch`, `quote_expired`, `malformed_quote`, `paymentid_replayed`,
-`no_nano_option`, `insufficient_balance`, `account_not_opened`, `broadcast_failed`. A door that cannot be reached, or a paid call the door did
+`no_nano_option`, `insufficient_balance`, `account_not_opened`, `broadcast_failed`. The gate in step 0
+answers 403 `host_not_loopback` or `browser_origin`, and 401 `proxy_key`, in the same shape. A door that cannot be reached, or a paid call the door did
 not serve, answers 502 with the hash and payment id so the call can be completed by hand within the
 quote's life (NanoGPT: 15 minutes, same body, same payment id).
 
@@ -137,7 +151,7 @@ cat > provider.patch.json5 <<'EOF'
     providers: {
       nanoproxy: {
         baseUrl: "http://127.0.0.1:3402/v1",
-        apiKey: "paid-per-call-in-nano",
+        apiKey: "<the value of PROXY_KEY>",
         api: "openai-completions",
         timeoutSeconds: 180,
         models: [
@@ -178,6 +192,11 @@ custom OpenAI-compatible provider (install-level review by llmrt, in progress).
   and the complete is not re-paid; the runtime sees the door's answer.
 - Not a service: nothing runs on pursekeeper's box for you except the free work and relay endpoints
   the wallet already used.
+- Not a wall between users of one machine. `PROXY_KEY` keeps other processes and browser tabs from
+  spending through the proxy; a process that can read the proxy's environment or its state file
+  (mode 600) is on the operator's side of the line already. ClawHub's scanner summary of 0.2.3
+  ("its local payment proxy can spend wallet funds from unauthenticated local requests") was right;
+  0.3.0 is the answer.
 
 ## Reviews, reports, credit
 
@@ -189,10 +208,11 @@ with a fix and credit in the changelog.
 
 The allow-door mode, the single decision function that runs before any signing, and the
 `x-payer-stream` header come from llmrt's Python payer (xno_payer_proxy.py, delivered 2026-10-08),
-with credit. The offline test suite (`npm test` at the skill root, 25 cases: both dialects, cap,
+with credit. The offline test suite (`npm test` at the skill root, 27 cases: both dialects, cap,
 per-call limit, allow-list, host binding, resource binding, expiry and a missing expiry, a replayed
 payment id, malformed quotes, wrong network, restart, six parallel requests against room for two,
-stream wrapping and a wrapped tool call, credential headers dropped on both paths, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
+stream wrapping and a wrapped tool call, credential headers dropped on both paths, a missing or wrong
+`PROXY_KEY` refused before the door is reached, a rebound Host and a browser Origin refused on both routes, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
 broadcast, a refund pocketed, start-up refusals, a one-raw cap boundary) runs against a loopback
 door and a loopback node that verifies every signature and frontier. Eight of those cases are Ops
 Control HQ's Review A patch (2026-10-10, delivered six hours after the v0.2.0 tag), which found

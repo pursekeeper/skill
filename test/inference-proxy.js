@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createServer } = require('node:http');
+const { createServer, request: httpRequest } = require('node:http');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const { mkdtemp, rm, readFile } = require('node:fs/promises');
@@ -139,15 +139,16 @@ async function stand(t, doorOpts, envExtra) {
   const door = mockDoor(node, doorOpts);
   const doorUrl = await listen(door.srv);
   const dir = await mkdtemp(join(tmpdir(), 'pk-proxy-'));
-  const env = { NANO_SEED: seed, UPSTREAM: doorUrl, NANO_RPC: node.url, WORK_URL: node.url, NANO_CAP: '0.01', NANO_MAX_PER_CALL: '0.005', PORT: '0', STATE_FILE: join(dir, 'state.json'), ...envExtra };
+  const env = { NANO_SEED: seed, UPSTREAM: doorUrl, NANO_RPC: node.url, WORK_URL: node.url, NANO_CAP: '0.01', NANO_MAX_PER_CALL: '0.005', PORT: '0', STATE_FILE: join(dir, 'state.json'), PROXY_KEY: KEY, ...envExtra };
   const proxy = await startProxy(env, dir);
   const shut = srv => { srv.close(); srv.closeAllConnections(); };
   t.after(async () => { await proxy.stop(); shut(node.srv); shut(door.srv); await rm(dir, { recursive: true, force: true }); });
-  const call = (body, headers, path) => fetch(`http://127.0.0.1:${proxy.port}${path || '/v1/chat/completions'}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer runtime-key', ...headers }, body: JSON.stringify(body) });
+  const call = (body, headers, path) => fetch(`http://127.0.0.1:${proxy.port}${path || '/v1/chat/completions'}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY, ...headers }, body: JSON.stringify(body) });
   const stateOf = () => fetch(`http://127.0.0.1:${proxy.port}/_nano/state`).then(r => r.json());
   return { seed, account, pub, node, door, proxy, env, dir, call, stateOf, restart: async () => { await proxy.stop(); const p2 = await startProxy(env, dir); t.after(() => p2.stop()); return p2; } };
 }
 
+const KEY = 'test-proxy-key-0123456789abcdef';   // PROXY_KEY for every proxy started here; the runtime presents it
 const MSG = { model: 'm', messages: [{ role: 'user', content: 'hi' }] };
 const MILLI = RAW / 1000n;   // 0.001 XNO
 
@@ -215,7 +216,7 @@ test('restart: the spend survives in the state file and the cap still holds', as
   assert.equal((await s.call(MSG)).status, 200);
   assert.equal((await s.call(MSG)).status, 200);
   const p2 = await s.restart();
-  const call2 = () => fetch(`http://127.0.0.1:${p2.port}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(MSG) });
+  const call2 = () => fetch(`http://127.0.0.1:${p2.port}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY }, body: JSON.stringify(MSG) });
   const r = await call2();
   assert.equal(r.status, 402);
   assert.equal((await r.json()).payer.code, 'cap_exceeded');
@@ -348,7 +349,7 @@ test('a door that does not answer 402 is relayed as is; non-/v1 paths are not fo
   assert.equal(s.node.st.processed.length, 0);
 });
 
-test('refuses to start without a cap, without an upstream, or with a state file of another account', async t => {
+test('refuses to start without a cap, without an upstream, without a 16+ character PROXY_KEY, or with a state file of another account', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'pk-proxy-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const seed = randomBytes(32).toString('hex');
@@ -357,8 +358,10 @@ test('refuses to start without a cap, without an upstream, or with a state file 
     { NANO_SEED: seed, NANO_CAP: '0.1' },
     { NANO_SEED: seed, UPSTREAM: 'http://example.invalid', NANO_CAP: '0.1' },
     { NANO_SEED: seed, UPSTREAM: 'https://example.invalid', NANO_CAP: 'lots' },
+    { NANO_SEED: seed, UPSTREAM: 'https://example.invalid', NANO_CAP: '0.1', PROXY_KEY: '' },
+    { NANO_SEED: seed, UPSTREAM: 'https://example.invalid', NANO_CAP: '0.1', PROXY_KEY: 'short-key' },
   ]) {
-    const code = await new Promise(r => spawn(process.execPath, [SCRIPT], { env: { PATH: process.env.PATH, HOME: dir, STATE_FILE: join(dir, 's.json'), ...env }, stdio: 'ignore' }).on('exit', r));
+    const code = await new Promise(r => spawn(process.execPath, [SCRIPT], { env: { PATH: process.env.PATH, HOME: dir, STATE_FILE: join(dir, 's.json'), PROXY_KEY: KEY, ...env }, stdio: 'ignore' }).on('exit', r));
     assert.equal(code, 2, JSON.stringify(env));
   }
 });
@@ -459,4 +462,67 @@ test('accepted broadcast with lost RPC reply is reconciled once and never paid t
   assert.equal(st.spent, '0.001');
   assert.equal(st.payments.length, 1);
   assert.equal(st.payments[0].status, 'served');
+});
+
+test('PROXY_KEY: a /v1 request without the key, or with a wrong one, is refused 401 before the door is reached, counted or anything signed; x-api-key carries it too (ClawHub scanner note, 2026-10-11)', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI });
+  const bare = (headers, path) => fetch(`http://127.0.0.1:${s.proxy.port}${path || '/v1/chat/completions'}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(MSG) });
+  for (const h of [{}, { authorization: 'Bearer ' + KEY.slice(0, -1) }, { authorization: KEY }, { 'x-api-key': 'not-the-key-at-all-0000' }, { 'x-api-key': KEY + 'x' }]) {
+    const r = await bare(h);
+    assert.equal(r.status, 401, JSON.stringify(h));
+    assert.equal(r.headers.get('x-payer-refused'), 'proxy_key');
+    const j = await r.json();
+    assert.equal(j.error.code, 'proxy_key');
+  }
+  assert.equal(s.door.st.lastHeaders, null, 'nothing reached the door');
+  assert.equal(s.door.st.completes.length, 0);
+  assert.equal(s.node.st.processed.length, 0, 'nothing signed or broadcast');
+  const st = await s.stateOf();
+  assert.equal(st.calls, 0, 'an unauthenticated request is not a call');
+  assert.equal(st.refused, 5);
+  // the key in x-api-key (Anthropic-style runtimes) is accepted and, as before, never reaches the door
+  const r = await bare({ 'x-api-key': KEY });
+  assert.equal(r.status, 200, await r.text());
+  assert.equal(s.door.st.lastHeaders['x-api-key'], undefined);
+  assert.equal(s.door.st.completes.length, 1);
+  assert.equal(s.node.st.processed.length, 1);
+  // state is readable without the key (nothing secret in it), /v1 is not
+  assert.equal((await s.stateOf()).paid, 1);
+});
+
+test('browser shapes are refused 403 before the key is even read: a non-loopback Host (DNS rebinding) and any Origin header (no-preflight POST), on /v1 and on /_nano/state', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI });
+  // raw http.request: Node's fetch silently replaces a caller-set Host header, and the Host is the point here
+  const at = (path, headers) => new Promise((resolve, reject) => {
+    const body = path === '/_nano/state' ? null : JSON.stringify(MSG);
+    const req = httpRequest({ host: '127.0.0.1', port: s.proxy.port, path, method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY, ...(body ? { 'content-length': Buffer.byteLength(body) } : {}), ...headers } }, res => {
+      let t = ''; res.on('data', c => { t += c; }); res.on('end', () => resolve({ status: res.statusCode, headers: { get: k => res.headers[k] }, text: async () => t }));
+    });
+    req.on('error', reject); if (body) req.write(body); req.end();
+  });
+  for (const [path, headers, code] of [
+    ['/v1/chat/completions', { host: 'rebound.example:3402' }, 'host_not_loopback'],
+    ['/v1/chat/completions', { host: 'rebound.example' }, 'host_not_loopback'],
+    ['/v1/chat/completions', { origin: 'https://evil.example' }, 'browser_origin'],
+    ['/v1/chat/completions', { origin: 'null' }, 'browser_origin'],
+    ['/_nano/state', { host: 'rebound.example:3402' }, 'host_not_loopback'],
+    ['/_nano/state', { origin: 'https://evil.example' }, 'browser_origin'],
+  ]) {
+    const r = await at(path, headers);
+    assert.equal(r.status, 403, path + ' ' + JSON.stringify(headers));
+    assert.equal(r.headers.get('x-payer-refused'), code);
+  }
+  // a browser's actual no-preflight shape: text/plain body, no credential, an Origin: refused on the origin alone
+  const r = await fetch(`http://127.0.0.1:${s.proxy.port}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'text/plain', origin: 'https://evil.example' }, body: JSON.stringify(MSG) });
+  assert.equal(r.status, 403);
+  assert.equal(s.door.st.served, 0);
+  assert.equal(s.node.st.processed.length, 0);
+  // the loopback spellings a runtime uses all pass
+  for (const host of ['127.0.0.1:' + s.proxy.port, 'localhost:' + s.proxy.port, 'localhost', '[::1]:' + s.proxy.port]) {
+    const ok = await at('/_nano/state', { host });
+    assert.equal(ok.status, 200, host);
+  }
+  const paid = await at('/v1/chat/completions', { host: 'localhost:' + s.proxy.port });
+  assert.equal(paid.status, 200, await paid.text());
+  assert.equal(s.node.st.processed.length, 1);
 });
