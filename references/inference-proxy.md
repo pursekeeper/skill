@@ -74,17 +74,30 @@ pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: po
    - **NanoGPT dialect** (`payment.accepted[]` with scheme `nano`): the proxy signs and broadcasts a
      send to the per-payment deposit account, polls `statusUrl` until the door reports the payment
      (a few seconds), and POSTs the same body to `completeUrl` with `x-x402: nano` and the payment
-     id. A broadcast the node rejects is uncounted and refused; a broadcast whose outcome cannot be
-     read stays counted as `unknown` and is resolved from the chain at the next call.
+     id. A broadcast the node rejects is refused `broadcast_failed`; a broadcast whose outcome cannot be
+     read stays counted as `unknown`. Either way the signed block is settled as described under
+     "what did not land" below.
    - **x402 exact dialect** (`PAYMENT-REQUIRED` header, x402 v2, scheme `exact`, network
      `nano:mainnet`: @x402nano/exact, feeless402, pursekeeper.dev and most of
      https://pursekeeper.dev/sellers): the signed block travels in `PAYMENT-SIGNATURE` and the
      seller broadcasts it; a "not yet confirmed" 402 is re-presented for up to a minute with the
      seller's `X-Nano-Represent` token, never re-signed. A refusal after signing is checked against
-     the chain: broadcast but not served stays counted and is reported; not broadcast is uncounted
-     and the signed payload is kept in the state file for the operator (it is not public; it could
-     still be broadcast by the seller later, so the next send from the same account builds on the
-     current frontier and the two would conflict; the network keeps one).
+     the chain: broadcast but not served stays counted and is reported with the hash and the token
+     (`broadcast_not_served`); not broadcast is `not_broadcast_refused` and settled as below. The
+     signed payload is not kept: a refused call is a new quote and a new send, never a re-presentation.
+   - **What did not land.** A signed send that is not on the chain can still land for as long as the
+     account's frontier is the block's `previous`: a seller that refused still holds a valid signed
+     block, and a node that took a broadcast whose reply was lost may process it later. So such a
+     send stays counted until it either lands or a different block is confirmed at its height, and
+     the proxy forces the second outcome itself: it publishes a change block at that height (same
+     balance, same representative, nothing moves; the work computed for the send is good for it).
+     Once that block is confirmed, which takes well under a second on the live network, the send
+     can never land and its amount is released from the cap. Each payment entry shows `counted`
+     (inside the cap right now), `final` (settled for good) and `invalidated_by` (the change block).
+     If the change block cannot be published, because the node is down, the amount stays counted,
+     counts against the cap, and is retried at the next call and at every start. Until 0.3.1 a
+     refused send was uncounted at once, which left one per-call amount per frontier that a seller
+     could broadcast later outside the cap (the 0.3.0 design note on pursekeeper/api#89).
 5. The reply carries `x-payer-paid` (XNO), `x-payer-hash` (the block) and, for NanoGPT,
    `x-payer-payment-id`, plus the door's own `x-x402-*` headers.
 
@@ -208,11 +221,11 @@ with a fix and credit in the changelog.
 
 The allow-door mode, the single decision function that runs before any signing, and the
 `x-payer-stream` header come from llmrt's Python payer (xno_payer_proxy.py, delivered 2026-10-08),
-with credit. The offline test suite (`npm test` at the skill root, 27 cases: both dialects, cap,
+with credit. The offline test suite (`npm test` at the skill root, 30 cases: both dialects, cap,
 per-call limit, allow-list, host binding, resource binding, expiry and a missing expiry, a replayed
 payment id, malformed quotes, wrong network, restart, six parallel requests against room for two,
 stream wrapping and a wrapped tool call, credential headers dropped on both paths, a missing or wrong
-`PROXY_KEY` refused before the door is reached, a rebound Host and a browser Origin refused on both routes, a rejected broadcast, an RPC error before submit, a lost reply after an accepted
+`PROXY_KEY` refused before the door is reached, a rebound Host and a browser Origin refused on both routes, a rejected broadcast retired by a change block, a seller that keeps the signed block and refuses and then cannot cash it, a retirement the node refuses that stays counted against the cap until it goes through, a send signed by a run that died before broadcasting settled at start-up, an RPC error before submit, a lost reply after an accepted
 broadcast, a refund pocketed, start-up refusals, a one-raw cap boundary) runs against a loopback
 door and a loopback node that verifies every signature and frontier. Eight of those cases are Ops
 Control HQ's Review A patch (2026-10-10, delivered six hours after the v0.2.0 tag), which found

@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const { createServer, request: httpRequest } = require('node:http');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
-const { mkdtemp, rm, readFile } = require('node:fs/promises');
+const { mkdtemp, rm, readFile, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const N = require('nanocurrency');
@@ -21,11 +21,11 @@ const readBody = req => new Promise((res, rej) => { let t = ''; req.on('data', c
 
 // ---- mock node: one account, balance and frontier tracked, blocks verified ----
 function mockNode(account, publicKey, initial) {
-  const st = { frontier: 'A'.repeat(64), balance: initial, processed: [], receivable: {}, rejectNext: 0, lostReplyNext: 0, accountError: null, workCalls: 0 };
+  const st = { frontier: 'A'.repeat(64), height: 1, balance: initial, processed: [], receivable: {}, rejectNext: 0, lostReplyNext: 0, accountError: null, workCalls: 0 };
   const srv = createServer(async (req, res) => {
     const b = JSON.parse(await readBody(req) || '{}');
     const out = o => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
-    if (b.action === 'account_info') return st.accountError ? out({ error: st.accountError }) : out({ frontier: st.frontier, balance: st.balance.toString(), representative: account });
+    if (b.action === 'account_info') return st.accountError ? out({ error: st.accountError }) : out({ frontier: st.frontier, balance: st.balance.toString(), representative: account, block_count: String(st.height), confirmation_height: String(st.height), confirmed_frontier: st.frontier });   // every accepted block counts as confirmed at once
     if (b.action === 'work_generate') { st.workCalls++; return out({ work: WORK }); }
     if (b.action === 'receivable') return out({ blocks: st.receivable });
     if (b.action === 'block_info') return st.processed.some(p => p.hash === b.hash) ? out({ contents: {} }) : out({ error: 'Block not found' });
@@ -40,13 +40,16 @@ function mockNode(account, publicKey, initial) {
       if (b.subtype === 'send') {
         if (bal > st.balance) return out({ error: 'Negative spend' });
         st.processed.push({ hash, subtype: 'send', amount: st.balance - bal, link: blk.link });
+      } else if (b.subtype === 'change') {
+        if (bal !== st.balance || blk.link !== '0'.repeat(64)) return out({ error: 'Not a change block' });
+        st.processed.push({ hash, subtype: 'change', amount: 0n, link: blk.link });
       } else {
         const src = st.receivable[blk.link];
         if (!src || BigInt(src.amount) !== bal - st.balance) return out({ error: 'Unreceivable' });
         delete st.receivable[blk.link];
         st.processed.push({ hash, subtype: b.subtype, amount: bal - st.balance });
       }
-      st.balance = bal; st.frontier = hash;
+      st.balance = bal; st.frontier = hash; st.height++;
       if (st.lostReplyNext > 0) { st.lostReplyNext--; return out({ error: 'timeout after accept' }); }
       return out({ hash });
     }
@@ -97,6 +100,7 @@ function mockDoor(node, opts) {
       if (!sig) return out(402, { 'payment-required': Buffer.from(JSON.stringify({ x402Version: 2, resource: opts.resourceTop || `http://${host}${req.url}`, accepts })).toString('base64') }, '{"error":"payment required"}');
       const p = JSON.parse(Buffer.from(sig, 'base64').toString());
       const blk = p.payload.block;
+      if (opts.keepUnbroadcast) { st.held = blk; return out(500, {}, '{"error":"served nothing, broadcast nothing"}'); }   // a seller that pockets the signed block and refuses
       // the seller broadcasts
       const r = await fetch(node.url, { method: 'POST', body: JSON.stringify({ action: 'process', subtype: 'send', block: blk }) }).then(x => x.json());
       if (!r.hash) return out(402, {}, JSON.stringify({ error: 'rejected: ' + r.error }));
@@ -320,16 +324,93 @@ test('exact dialect: a call the seller broadcast but did not serve is reported, 
   assert.equal(st.spent, '0.001'); assert.equal(st.payments[0].status, 'broadcast_not_served');
 });
 
-test('nano dialect: a broadcast the node rejects leaves the spend uncounted and the runtime told', async t => {
+test('nano dialect: a broadcast the node rejects is retired by a change block at the same height, then uncounted; the runtime told', async t => {
   const s = await stand(t, { mode: 'nano', amount: MILLI });
   s.node.st.rejectNext = 1;
   const r = await s.call(MSG);
   assert.equal(r.status, 402);
-  assert.equal((await r.json()).payer.code, 'broadcast_failed');
+  const j = await r.json();
+  assert.equal(j.payer.code, 'broadcast_failed');
+  assert.equal(j.payer.detail.counted, false);
+  assert.match(j.payer.detail.invalidated_by, /^[0-9A-F]{64}$/);
   const st = await s.stateOf();
   assert.equal(st.spent, '0'); assert.equal(st.payments[0].status, 'not_broadcast');
+  assert.equal(st.payments[0].counted, false); assert.equal(st.payments[0].final, true);
+  assert.equal(s.node.st.processed.map(p => p.subtype).join(','), 'change', 'the change block sits where the rejected send would have');
+  assert.equal(s.node.st.processed[0].hash, j.payer.detail.invalidated_by);
+  assert.equal(s.node.st.workCalls, 1, 'the work computed for the send is reused for the change block');
   assert.equal((await s.call(MSG)).status, 200, 'the next call pays normally');
   assert.equal((await s.stateOf()).spent, '0.001');
+  assert.equal(s.node.st.processed.map(p => p.subtype).join(','), 'change,send');
+});
+
+test('exact dialect: a seller that keeps the signed block and refuses cannot broadcast it later: a change block takes its height, the spend is uncounted, no payload is kept', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, keepUnbroadcast: true });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 502);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'not_served_after_payment');
+  assert.equal(j.payer.detail.broadcast, false);
+  assert.equal(j.payer.detail.counted, false);
+  assert.match(j.payer.detail.invalidated_by, /^[0-9A-F]{64}$/);
+  const st = await s.stateOf();
+  assert.equal(st.spent, '0');
+  assert.equal(st.payments[0].status, 'not_broadcast_refused'); assert.equal(st.payments[0].counted, false); assert.equal(st.payments[0].final, true);
+  assert.equal(st.payments[0].payload, undefined);
+  const raw = JSON.parse(await readFile(join(s.dir, 'state.json'), 'utf8'));
+  assert.equal(raw.payments[0].payload, undefined, 'the signed payload is not kept in the state file');
+  assert.equal(s.node.st.processed.map(p => p.subtype).join(','), 'change');
+  assert.equal(s.node.st.workCalls, 1, 'the send\'s work is reused');
+  // the seller tries to cash the block it kept
+  const held = s.door.st.held;
+  assert.ok(held && held.signature, 'the seller holds the signed block');
+  const late = await fetch(s.node.url, { method: 'POST', body: JSON.stringify({ action: 'process', subtype: 'send', block: held }) }).then(x => x.json());
+  assert.equal(late.hash, undefined, 'the held block is dead: ' + JSON.stringify(late));
+  assert.equal(s.node.st.balance, 10n * RAW, 'nothing moved');
+  assert.equal((await s.call(MSG, {}, '/v1/chat/completions')).status, 502, 'the door still refuses, a fresh send each time');
+  assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('a retirement that cannot be published keeps the spend counted against the cap until it can', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI }, { NANO_CAP: '0.0015' });
+  s.node.st.rejectNext = 3;                                   // the send, the change block, and the change block again at the next call
+  let r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  let j = await r.json();
+  assert.equal(j.payer.code, 'broadcast_failed');
+  assert.equal(j.payer.detail.counted, true, 'no change block could be published: the signed block may still land, so it stays counted');
+  assert.equal(j.payer.detail.invalidated_by, null);
+  let st = await s.stateOf();
+  assert.equal(st.spent, '0.001'); assert.equal(st.payments[0].status, 'not_broadcast'); assert.equal(st.payments[0].counted, true); assert.equal(st.payments[0].final, false);
+  r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  j = await r.json();
+  assert.equal(j.payer.code, 'cap_exceeded', 'the held amount counts against the cap');
+  assert.equal(s.node.st.processed.length, 0);
+  r = await s.call(MSG);
+  assert.equal(r.status, 200, 'the change block went through this time, the held amount was released, the call paid');
+  st = await s.stateOf();
+  assert.equal(st.spent, '0.001');
+  assert.equal(st.payments[0].counted, false); assert.equal(st.payments[0].final, true); assert.match(st.payments[0].invalidated_by, /^[0-9A-F]{64}$/);
+  assert.equal(s.node.st.processed.map(p => p.subtype).join(','), 'change,send');
+});
+
+test('a send signed by a run that died before broadcasting is settled at start-up: retired and uncounted', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI });
+  assert.equal((await s.call(MSG)).status, 200);
+  await s.proxy.stop();
+  const file = join(s.dir, 'state.json');
+  const raw = JSON.parse(await readFile(file, 'utf8'));
+  // a signed, counted, never-broadcast send at the current height, as a crash between persist() and broadcast() leaves it
+  raw.payments.push({ t: new Date().toISOString(), kind: 'nano', amount_raw: MILLI.toString(), payTo: s.account, paymentId: 'pay_dead', hash: 'B'.repeat(64), previous: s.node.st.frontier, height: s.node.st.height + 1, work: WORK, status: 'signed', counted: true, path: '/v1/chat/completions' });
+  raw.spent_raw = (BigInt(raw.spent_raw) + MILLI).toString();
+  await writeFile(file, JSON.stringify(raw));
+  const p2 = await s.restart();
+  let st;
+  for (let i = 0; i < 40; i++) { st = await fetch(`http://127.0.0.1:${p2.port}/_nano/state`).then(r => r.json()); if (st.payments[1].final) break; await new Promise(r => setTimeout(r, 100)); }
+  assert.equal(st.spent, '0.001', 'the dead send is uncounted, the real one stays');
+  assert.equal(st.payments[1].status, 'signed'); assert.equal(st.payments[1].counted, false); assert.equal(st.payments[1].final, true);
+  assert.equal(s.node.st.processed.map(p => p.subtype).join(','), 'send,change');
 });
 
 test('refunds: a receivable is pocketed before the next paid call and counted as received', async t => {

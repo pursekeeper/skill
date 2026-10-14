@@ -12,7 +12,11 @@
 //      WORK_URL (optional RPC-style work_generate endpoint),
 //      HEADERS (optional JSON object of extra request headers, e.g. a Bearer token),
 //      METHOD and BODY (optional, e.g. METHOD=POST BODY='{"hash":"..."}' to buy a work
-//      from POST /v1/work; the same method and body are used for the 402 probe and the paid call).
+//      from POST /v1/work; the same method and body are used for the 402 probe and the paid call),
+//      NANO_SAVE_PAYLOAD (optional path: after the call, the PAYMENT-SIGNATURE header value is written there as JSON with
+//      the url, method, block hash, final status and last X-Nano-Represent token, mode 600, so the same payment can be
+//      re-presented later, e.g. to a seller's download route that takes the purchase header as proof. Off by default:
+//      until the block is on the chain the file is a signed, spendable send; treat it like the seed).
 // Work: WORK_URL if set, else the seller's POST /v1/work if it has one, else local
 // CPU (about 20-30 s). Only dependency: nanocurrency (npm i nanocurrency).
 //
@@ -141,6 +145,12 @@ async function work(hash, origin) {
   // and body re-presented after a lost reply); it is the reply that was paid for, not a refusal.
   if (r.headers.get('x-nano-replay') === 'true') console.error('reply served again from the seller\'s replay cache (x-nano-replay: true)');
   console.log(r.status, await r.text());
+  if (process.env.NANO_SAVE_PAYLOAD) {
+    const fs = require('node:fs');
+    const out = { saved_at: new Date().toISOString(), url, method: init.method || 'GET', hash, status: r.status, served: r.status >= 200 && r.status < 300, represent_token: lastToken, payment_signature: init.headers['payment-signature'] };
+    fs.writeFileSync(process.env.NANO_SAVE_PAYLOAD, JSON.stringify(out, null, 1) + '\n', { mode: 0o600 });
+    console.error('payment header saved to ' + process.env.NANO_SAVE_PAYLOAD + (out.served ? '' : ' (not served; the signed block inside is still spendable until the account\'s frontier moves)'));
+  }
   // Anything but 2xx after the payment means the call was not served: exit 1, so a caller that reads only the return code
   // does not count an unserved call as done (pyfile-toolkit, 2026-10-02). The body printed above is the seller's last answer;
   // for a not-yet-confirmed 402 it carries the X-Nano-Represent token to re-present the same block with later.

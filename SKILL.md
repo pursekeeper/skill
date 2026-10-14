@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.0
+version: 0.3.1
 metadata:
   openclaw:
     requires:
@@ -13,6 +13,9 @@ metadata:
       - name: NANO_MAX_PAY
         required: false
         description: Spending cap for scripts/client-x402.js in NANO as decimal text (0.05, 1, 0.000001), default 0.01. A 402 quote above it is refused and nothing is signed. Anything that is not a decimal amount falls back to 0.01 with a warning. Raise it on purpose, per run.
+      - name: NANO_SAVE_PAYLOAD
+        required: false
+        description: Optional path. After a scripts/client-x402.js call, the PAYMENT-SIGNATURE header value is written there (mode 600) with the url, block hash and final status, so the same payment can be re-presented as proof of purchase. Until the block is on the chain the file is a spendable signed send; leave unset unless a seller's download route needs it.
       - name: NANO_CAP
         required: false
         description: Cumulative spending cap for scripts/inference-proxy.js in NANO as decimal text, over the life of its state file. The proxy refuses to start without it.
@@ -115,6 +118,7 @@ attestation API, pursekeeper's own API): the signed send block travels inside th
 NANO_SEED=... node scripts/client-x402.js https://pursekeeper.dev/v1/echo?msg=hello
 NANO_SEED=... NANO_MAX_PAY=0.05 node scripts/client-x402.js https://some-seller.example/paid   # cap in NANO; default 0.01, a higher quote is refused unsigned
 NANO_SEED=... METHOD=POST BODY='{"records":[...]}' node scripts/client-x402.js https://nano-csv-service.onrender.com/clean
+NANO_SEED=... NANO_SAVE_PAYLOAD=./proof.json node scripts/client-x402.js https://seller.example/buy   # keeps the payment header for a later download route; mode 600, spendable until the block lands
 ```
 
 **NanoGPT's `nano` scheme** (LLM inference, per-payment deposit address): three HTTP
