@@ -97,7 +97,7 @@ pursekeeper.dev's free `/v1/work` at 6 a minute, else the CPU), `RECEIVE` (1: po
      If the change block cannot be published, because the node is down, the amount stays counted,
      counts against the cap, and is retried at the next call and at every start. Until 0.3.1 a
      refused send was uncounted at once, which left one per-call amount per frontier that a seller
-     could broadcast later outside the cap (the 0.3.0 design note on pursekeeper/api#89).
+     could broadcast later outside the cap (the path llmrt's Review B report of 2026-10-13 documented; the gap was noted in the ruling on it).
 5. The reply carries `x-payer-paid` (XNO), `x-payer-hash` (the block) and, for NanoGPT,
    `x-payer-payment-id`, plus the door's own `x-x402-*` headers.
 
