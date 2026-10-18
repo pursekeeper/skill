@@ -7,7 +7,11 @@
 // Env: NANO_SEED (required), NANO_INDEX (account index, default 0),
 //      NANO_MAX_PAY (spending cap in NANO as decimal text, default 0.01; a 402 quote above it is refused, nothing signed, exit 3),
 // Exit codes: 0 when the call was served (2xx), 1 when it ended on any other status or threw, 2 without a seed, 3 above the cap,
-//      4 when the seller's 402 resource breaks the x402 v2 ResourceInfo caps (nothing signed; the seller has to fix the 402).
+//      4 when the seller's 402 resource breaks the x402 v2 ResourceInfo caps (nothing signed; the seller has to fix the 402),
+//      5 when another process of this wallet held the account lock for longer than NANO_LOCK_WAIT_MS (nothing signed).
+//      NANO_LOCK (the per-account lock below; default on, NANO_LOCK=0 turns it off), NANO_LOCK_DIR (where the lock file
+//      lives, default the system temp dir), NANO_LOCK_WAIT_MS (how long to wait for it, default 120000), NANO_LOCK_MAX_MS
+//      (a holder older than this, or whose process is gone, is taken over; default 180000),
 //      NANO_RPC (optional node RPC override for account_info),
 //      API (no-node account-info service, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint),
@@ -26,8 +30,20 @@
 // -> retry with PAYMENT-SIGNATURE: base64 JSON {x402Version, resource, accepted,
 // payload: {block}} -> the seller verifies and broadcasts the block, replies 200
 // with PAYMENT-RESPONSE carrying the block hash.
+//
+// One writer per account. A Nano account chain is serial: each send commits to its predecessor, so ten processes paying
+// from one seed at once would sign ten competing blocks against one frontier; one would land and nine would be refused
+// frontier_moved (CasualSecurityInc's x402.Nano review at 7c55f32, pursekeeper/api#90, 2026-10-18). Per-hash locks on the
+// seller or facilitator side cannot order them, the hashes differ. So this client holds a per-account lock on this host
+// from the frontier read until the fate of its block is known (served; refused with the frontier untouched; landed; or
+// dead because the frontier moved past it), then exits and releases, and the next process signs against the new
+// frontier. Two hosts sharing one seed are not covered: give each writer its own NANO_INDEX, one account per writer,
+// which is also the way to pay in parallel on one host. After any outcome but 2xx the fate is printed with what to do:
+// re-present the same payment (landed, or untouched) or sign anew (dead); a lost reply after the payment was sent is
+// resolved the same way instead of being reported as an error.
 'use strict';
 const N = require('nanocurrency');
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 
 // Mirror of @x402/core's ResourceInfoSchema caps (2.25.0), kept dependency-free. Returns '' when fine, else what is wrong.
 function resourceInfoFault(r) {
@@ -76,6 +92,71 @@ async function work(hash, origin) {
   } catch (e) { console.error('seller /v1/work unavailable:', e.message); }
   console.error('computing work locally (this takes a while)...');
   return N.computeWork(hash, { workThreshold: 'fffffff800000000' });
+}
+
+// The per-account lock (see the header). A file created with O_EXCL under NANO_LOCK_DIR holding "pid startMs": the create
+// is atomic, so one process wins. A holder whose process is gone, or older than NANO_LOCK_MAX_MS, is stale; its file is
+// removed only if it still reads as that same holder, then the loop tries again (two waiters may both remove the same
+// stale file; that costs nothing). Released when this process exits, by which time the fate of its block has been
+// printed; a seller that serves before confirmation leaves the next writer's block in the "not confirmed yet" loop below.
+function walletLock(account) {
+  if (process.env.NANO_LOCK === '0') return Promise.resolve();
+  const file = path.join(process.env.NANO_LOCK_DIR || os.tmpdir(), 'pursekeeper-wallet-' + account + '.lock');
+  const waitMs = Number(process.env.NANO_LOCK_WAIT_MS) > 0 ? Number(process.env.NANO_LOCK_WAIT_MS) : 120000;
+  const maxMs = Number(process.env.NANO_LOCK_MAX_MS) > 0 ? Number(process.env.NANO_LOCK_MAX_MS) : 180000;
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const mine = process.pid + ' ' + Date.now();
+  const start = Date.now();
+  let told = false;
+  return (async () => {
+    for (;;) {
+      try { fs.writeFileSync(file, mine, { flag: 'wx' }); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+      let holder = ''; try { holder = fs.readFileSync(file, 'utf8'); } catch { continue; }   // gone between the two calls
+      const [pidText, atText] = holder.trim().split(' ');
+      const pid = Number(pidText), age = Date.now() - Number(atText);
+      if (!(pid > 0) || !alive(pid) || !(age < maxMs)) {
+        console.error('wallet lock on ' + account + ' is stale (' + (pid > 0 && alive(pid) ? 'pid ' + pid + ' has held it ' + Math.round(age / 1000) + ' s' : 'its process is gone') + '); taking it over');
+        try { if (fs.readFileSync(file, 'utf8') === holder) fs.unlinkSync(file); } catch { /* removed by another waiter */ }
+        continue;
+      }
+      if (Date.now() - start >= waitMs) {
+        console.error('refusing: waited ' + Math.round(waitMs / 1000) + ' s for the wallet lock on ' + account + ' (pid ' + pid + ' is mid-payment from this account). Nothing signed. Retry later, or give this process its own NANO_INDEX.');
+        process.exit(5);
+      }
+      if (!told) { console.error('waiting for the wallet lock on ' + account + ': pid ' + pid + ' is mid-payment from this account'); told = true; }
+      await new Promise(s => setTimeout(s, 150 + Math.random() * 150));
+    }
+    const release = () => { try { if (fs.readFileSync(file, 'utf8') === mine) fs.unlinkSync(file); } catch { /* not ours any more */ } };
+    process.on('exit', release);
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { release(); process.exit(1); });
+  })();
+}
+
+// The fate of the signed block, read from the account: 'landed' (the frontier is the block, or the chain holds the block
+// behind a later one), 'untouched' (the frontier is still block.previous: nothing was broadcast, the same PAYMENT-SIGNATURE
+// is still good), 'dead' (the frontier moved to another block and this one is not on the chain: a concurrent payment, a
+// receive or a representative change from this wallet landed first; this block can never land and nothing moved from it),
+// or null when the account or the block could not be read.
+async function fateOf(account, hash, previous) {
+  let frontier; try { frontier = String((await accountInfo(account)).frontier || '').toUpperCase(); } catch { return null; }
+  if (!frontier) return null;
+  if (frontier === hash.toUpperCase()) return 'landed';
+  if (frontier === previous.toUpperCase()) return 'untouched';
+  try {   // neither: is the block on the chain behind a later one, or not at all?
+    if (RPC) { const b = await rpc(RPC, { action: 'block_info', json_block: 'true', hash }); return b && b.block_account && !b.error ? 'landed' : 'dead'; }
+    const b = await fetch(API + '/v1/verify?hash=' + hash + '&any=1&any_to=1').then(r => r.json());
+    return b && b.found === true ? 'landed' : b && b.found === false ? 'dead' : null;
+  } catch { return null; }
+}
+async function explainFate(account, hash, previous, lastToken) {
+  const fate = await fateOf(account, hash, previous);
+  const again = 're-present the same PAYMENT-SIGNATURE for the same call' + (lastToken ? ' with X-Nano-Represent token ' + lastToken : '') + '; do not sign a new block';
+  const text = fate === 'landed' ? 'the block is on the chain (hash ' + hash + '): ' + again + ' (pursekeeper.dev replays the reply it bought for ten minutes)'
+    : fate === 'untouched' ? 'the account frontier is still ' + previous + ', so the seller did not broadcast the block and nothing moved: ' + again + ' while the frontier stays there'
+    : fate === 'dead' ? 'the account frontier moved past ' + previous + ' to another block, not this one (hash ' + hash + '): a concurrent payment, a receive or a representative change from this wallet landed first, so this block can never land and nothing moved from it; sign a new block for this call'
+    : 'could not read the account to tell whether the block was broadcast; check hash ' + hash + ' before paying again';
+  console.error('not served; ' + text);
+  return fate;
 }
 
 (async () => {
@@ -127,6 +208,7 @@ async function work(hash, origin) {
     process.exit(3);
   }
 
+  await walletLock(account);   // from here until exit this process is the account's only writer on this host
   const info = await accountInfo(account);
   if (info.error) throw new Error('account_info: ' + info.error + ' (is the account opened and funded?)');
   const balance = BigInt(info.balance) - BigInt(accepted.amount);
@@ -143,7 +225,10 @@ async function work(hash, origin) {
 
   const payload = { x402Version: 2, resource: pr.resource, accepted, payload: { block } };
   const init = reqInit(); init.headers['payment-signature'] = b64(payload);   // header names are case-insensitive; lowercase keeps the map free of case variants
-  let r = await fetch(url, init);
+  // A transport failure after the payment was sent (the seller went away mid-call, a timeout) is not an error to report
+  // and stop at: the block may be on the chain. Its fate is read from the account below, like any other unserved outcome.
+  const lost = e => { console.error('no reply from the seller after the payment was sent: ' + e.message); return null; };
+  let r = await fetch(url, init).catch(lost);
   // A 402 after the payment whose note says the block was broadcast but not yet confirmed (pursekeeper.dev waits 8 s for
   // confirmation before serving, since 2026-09-29): the block is on the chain, so re-present the same payload for up to a
   // minute. Never sign a new block here: the frontier has moved to the pending block and a new send would pay twice.
@@ -151,7 +236,7 @@ async function work(hash, origin) {
   // said "on the node but not confirmed yet" with no token until 2026-10-03, and the loop stopped on it: PlatinumVera,
   // 2026-10-03), so any "not confirmed" wording keeps the loop going.
   let lastToken = null;
-  for (let waited = 0; r.status === 402 && waited < 60_000; waited += 2000) {
+  for (let waited = 0; r && r.status === 402 && waited < 60_000; waited += 2000) {
     const b = await r.clone().json().catch(() => null);
     if (!b || !/not (yet )?confirmed/.test(String(b.note || b.error || ''))) break;
     // The 402 carries a single-use token (since 2026-09-29 16:xx UTC) that binds the re-presentation to this client: the
@@ -163,34 +248,31 @@ async function work(hash, origin) {
     if (tok) { init.headers['x-nano-represent'] = String(tok); lastToken = String(tok); } else delete init.headers['x-nano-represent'];
     console.error('block ' + hash + ' broadcast, not yet confirmed; re-presenting the same payment');
     await new Promise(s => setTimeout(s, 2000));
-    r = await fetch(url, init);
+    r = await fetch(url, init).catch(lost);
   }
-  const settle = r.headers.get('payment-response');
-  if (settle) console.error('settlement:', unb64(settle));
-  // x-nano-replay: true marks a reply served again from the seller's ten-minute replay cache (the same payment, method, URL
-  // and body re-presented after a lost reply); it is the reply that was paid for, not a refusal.
-  if (r.headers.get('x-nano-replay') === 'true') console.error('reply served again from the seller\'s replay cache (x-nano-replay: true)');
-  console.log(r.status, await r.text());
+  if (r) {
+    const settle = r.headers.get('payment-response');
+    if (settle) console.error('settlement:', unb64(settle));
+    // x-nano-replay: true marks a reply served again from the seller's ten-minute replay cache (the same payment, method, URL
+    // and body re-presented after a lost reply); it is the reply that was paid for, not a refusal.
+    if (r.headers.get('x-nano-replay') === 'true') console.error('reply served again from the seller\'s replay cache (x-nano-replay: true)');
+    console.log(r.status, await r.text());
+  }
+  const served = !!r && r.status >= 200 && r.status < 300;
   if (process.env.NANO_SAVE_PAYLOAD) {
-    const fs = require('node:fs');
-    const out = { saved_at: new Date().toISOString(), url, method: init.method || 'GET', hash, status: r.status, served: r.status >= 200 && r.status < 300, represent_token: lastToken, payment_signature: init.headers['payment-signature'] };
+    const out = { saved_at: new Date().toISOString(), url, method: init.method || 'GET', hash, status: r ? r.status : null, served, represent_token: lastToken, payment_signature: init.headers['payment-signature'] };
     fs.writeFileSync(process.env.NANO_SAVE_PAYLOAD, JSON.stringify(out, null, 1) + '\n', { mode: 0o600 });
-    console.error('payment header saved to ' + process.env.NANO_SAVE_PAYLOAD + (out.served ? '' : ' (not served; the signed block inside is still spendable until the account\'s frontier moves)'));
+    console.error('payment header saved to ' + process.env.NANO_SAVE_PAYLOAD + (served ? '' : ' (not served; the signed block inside is still spendable until the account\'s frontier moves)'));
   }
   // Anything but 2xx after the payment means the call was not served: exit 1, so a caller that reads only the return code
   // does not count an unserved call as done (pyfile-toolkit, 2026-10-02). The body printed above is the seller's last answer;
-  // for a not-yet-confirmed 402 it carries the X-Nano-Represent token to re-present the same block with later.
-  if (r.status < 200 || r.status >= 300) {
+  // for a not-yet-confirmed 402 it carries the X-Nano-Represent token to re-present the same block with later. What the
+  // payer then needs is the fate of the block, read from the account rather than assumed (PlatinumVera, 2026-10-03;
+  // pyfile-toolkit /web/search, 2026-10-05): landed or untouched means re-present the same payment, dead means sign anew.
+  // Until 2026-10-18 a frontier that was neither the block nor its previous was reported as "still <frontier>, nothing
+  // moved, re-present", which for a block overtaken by a concurrent writer is advice that can never work (api#90).
+  if (!served) {
     process.exitCode = 1;
-    // What the payer needs to get the call later without paying again: the block hash and the last token seen, even when
-    // the final 402 printed above carries neither (PlatinumVera, 2026-10-03).
-    // Say whether the block was broadcast instead of assuming it: a seller that refuses a paid call before
-    // settling leaves the frontier unchanged, and the same signed payload is still good (pyfile-toolkit /web/search, 2026-10-05).
-    let frontier = null;
-    try { frontier = String((await accountInfo(account)).frontier || '').toUpperCase(); } catch { /* cannot tell; the line below says so */ }
-    const where = frontier === null ? 'could not read the account to tell whether the block was broadcast'
-      : frontier === String(hash).toUpperCase() ? 'the block is on the chain'
-      : 'the account frontier is still ' + frontier + ', so the seller did not broadcast the block and nothing moved';
-    console.error('not served; ' + where + ': hash ' + hash + (lastToken ? ', X-Nano-Represent token ' + lastToken : ', no X-Nano-Represent token was issued') + '; re-present the same PAYMENT-SIGNATURE for the same call' + (lastToken ? ' with that token' : '') + ', do not sign a new block');
+    await explainFate(account, hash, String(info.frontier), lastToken);
   }
 })().catch(e => { console.error('error:', e.message); process.exit(1); });

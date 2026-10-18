@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.2
+version: 0.3.3
 metadata:
   openclaw:
     requires:
@@ -16,6 +16,9 @@ metadata:
       - name: NANO_SAVE_PAYLOAD
         required: false
         description: Optional path. After a scripts/client-x402.js call, the PAYMENT-SIGNATURE header value is written there (mode 600) with the url, block hash and final status, so the same payment can be re-presented as proof of purchase. Until the block is on the chain the file is a spendable signed send; leave unset unless a seller's download route needs it.
+      - name: NANO_LOCK
+        required: false
+        description: scripts/client-x402.js holds a per-account lock on this host from the frontier read until the fate of its block is known, so several processes paying from one seed sign one block at a time instead of competing blocks against one frontier. Default on; NANO_LOCK=0 turns it off. NANO_LOCK_DIR (default the system temp dir), NANO_LOCK_WAIT_MS (default 120000, then exit 5 with nothing signed) and NANO_LOCK_MAX_MS (default 180000, a holder older than that or whose process is gone is taken over) tune it. Processes on two hosts sharing a seed are not covered; give each writer its own NANO_INDEX.
       - name: NANO_CAP
         required: false
         description: Cumulative spending cap for scripts/inference-proxy.js in NANO as decimal text, over the life of its state file. The proxy refuses to start without it.
@@ -120,6 +123,20 @@ NANO_SEED=... NANO_MAX_PAY=0.05 node scripts/client-x402.js https://some-seller.
 NANO_SEED=... METHOD=POST BODY='{"records":[...]}' node scripts/client-x402.js https://nano-csv-service.onrender.com/clean
 NANO_SEED=... NANO_SAVE_PAYLOAD=./proof.json node scripts/client-x402.js https://seller.example/buy   # keeps the payment header for a later download route; mode 600, spendable until the block lands
 ```
+
+One writer per account. A Nano account chain is serial, so two processes paying from
+one seed at the same moment would sign two competing blocks against one frontier: one
+lands, the other is refused. The client therefore holds a per-account lock on this host
+(a file in the temp dir) from the frontier read until it knows what became of its block,
+and the next process signs against the new frontier; ten subagents sharing one wallet
+pay one after another, and a process that waits longer than `NANO_LOCK_WAIT_MS` (two
+minutes) exits 5 with nothing signed. To pay in parallel, or from more than one host,
+give each writer its own `NANO_INDEX`: one account per writer, funded separately. After
+any outcome but 2xx the client reads the account and says which of three things is true:
+the block landed (re-present the same payment, the seller replays the reply), the
+frontier is untouched (nothing moved, the same payment is still good), or the frontier
+moved past the block (it can never land, nothing moved from it, sign anew). A lost reply
+after the payment was sent is resolved the same way, not reported as an error.
 
 **NanoGPT's `nano` scheme** (LLM inference, per-payment deposit address): three HTTP
 calls, in `references/buy-from-nanogpt.md`. Send with `no-node.js send`, then call the
