@@ -6,7 +6,8 @@
 //
 // Env: NANO_SEED (required), NANO_INDEX (account index, default 0),
 //      NANO_MAX_PAY (spending cap in NANO as decimal text, default 0.01; a 402 quote above it is refused, nothing signed, exit 3),
-// Exit codes: 0 when the call was served (2xx), 1 when it ended on any other status or threw, 2 without a seed, 3 above the cap.
+// Exit codes: 0 when the call was served (2xx), 1 when it ended on any other status or threw, 2 without a seed, 3 above the cap,
+//      4 when the seller's 402 resource breaks the x402 v2 ResourceInfo caps (nothing signed; the seller has to fix the 402).
 //      NANO_RPC (optional node RPC override for account_info),
 //      API (no-node account-info service, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint),
@@ -27,6 +28,22 @@
 // with PAYMENT-RESPONSE carrying the block hash.
 'use strict';
 const N = require('nanocurrency');
+
+// Mirror of @x402/core's ResourceInfoSchema caps (2.25.0), kept dependency-free. Returns '' when fine, else what is wrong.
+function resourceInfoFault(r) {
+  if (!r || typeof r !== 'object') return 'resource missing';
+  if (typeof r.url !== 'string' || !r.url) return 'resource.url missing';
+  const ascii = s => /^[\x20-\x7e]+$/.test(s);
+  if (r.serviceName != null && (typeof r.serviceName !== 'string' || r.serviceName.length < 1 || r.serviceName.length > 32 || !ascii(r.serviceName)))
+    return `resource.serviceName is ${typeof r.serviceName === 'string' ? r.serviceName.length + ' characters' : typeof r.serviceName}, allowed 1-32 printable ASCII`;
+  if (r.tags != null) {
+    if (!Array.isArray(r.tags) || r.tags.length > 5) return `resource.tags has ${Array.isArray(r.tags) ? r.tags.length : 'no'} entries, allowed at most 5`;
+    const bad = r.tags.find(t => typeof t !== 'string' || t.length < 1 || t.length > 32 || !ascii(t));
+    if (bad !== undefined) return `resource.tags entry ${JSON.stringify(bad)} is not 1-32 printable ASCII characters`;
+  }
+  if (r.iconUrl != null && (typeof r.iconUrl !== 'string' || r.iconUrl.length > 2048)) return 'resource.iconUrl longer than 2048';
+  return '';
+}
 
 const url = process.argv[2] || 'https://pursekeeper.dev/v1/echo?msg=hello';
 const RPC = process.env.NANO_RPC;
@@ -82,6 +99,15 @@ async function work(hash, origin) {
   if (!pr || pr.x402Version !== 2) throw new Error('no x402 v2 PaymentRequired in the 402');
   const accepted = pr.accepts.find(a => a.scheme === 'exact' && a.network === 'nano:mainnet');
   if (!accepted) throw new Error('seller does not accept exact on nano:mainnet: ' + JSON.stringify(pr.accepts));
+  // The 402's resource is echoed verbatim into the payment header, and a facilitator that parses with @x402/core refuses
+  // the whole payment when it breaks the x402 v2 ResourceInfo caps (serviceName and each tag: 1-32 printable ASCII
+  // characters; at most 5 tags; iconUrl at most 2048). Checked here before anything is signed, so a seller's typo does not
+  // cost the payer a signed block (Ops Control HQ page-extract, serviceName 34 characters, refused invalid_block, 2026-10-18).
+  const resourceFault = resourceInfoFault(pr.resource);
+  if (resourceFault) {
+    console.error(`refusing: the seller's 402 resource fails the x402 v2 ResourceInfo schema (${resourceFault}); a facilitator would refuse the payment as invalid_block, so nothing is signed. Tell the seller.`);
+    process.exit(4);
+  }
   console.error(`seller wants ${accepted.amount} raw (${Number(accepted.amount) / 1e30} NANO) to ${accepted.payTo}`);
   // Spending cap. A 402 is a stranger's quote; never sign for more than you decided beforehand.
   // NANO_MAX_PAY is in NANO (default 0.01). Set it higher on purpose, per run, when you mean it.
