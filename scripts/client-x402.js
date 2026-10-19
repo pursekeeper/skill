@@ -8,10 +8,10 @@
 //      NANO_MAX_PAY (spending cap in NANO as decimal text, default 0.01; a 402 quote above it is refused, nothing signed, exit 3),
 // Exit codes: 0 when the call was served (2xx), 1 when it ended on any other status or threw, 2 without a seed, 3 above the cap,
 //      4 when the seller's 402 resource breaks the x402 v2 ResourceInfo caps (nothing signed; the seller has to fix the 402),
-//      5 when another process of this wallet held the account lock for longer than NANO_LOCK_WAIT_MS (nothing signed).
+//      5 when the wallet lock wait reaches NANO_LOCK_WAIT_MS, or a live holder reaches NANO_LOCK_MAX_MS (nothing signed).
 //      NANO_LOCK (the per-account lock below; default on, NANO_LOCK=0 turns it off), NANO_LOCK_DIR (where the lock file
 //      lives, default the system temp dir), NANO_LOCK_WAIT_MS (how long to wait for it, default 120000), NANO_LOCK_MAX_MS
-//      (a holder older than this, or whose process is gone, is taken over; default 180000),
+//      (refuse immediately if a live holder has held it this long; never take over a live holder; default 180000),
 //      NANO_RPC (optional node RPC override for account_info),
 //      API (no-node account-info service, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint),
@@ -95,16 +95,16 @@ async function work(hash, origin) {
 }
 
 // The per-account lock (see the header). A file created with O_EXCL under NANO_LOCK_DIR holding "pid startMs": the create
-// is atomic, so one process wins. A holder whose process is gone, or older than NANO_LOCK_MAX_MS, is stale; its file is
-// removed only if it still reads as that same holder, then the loop tries again (two waiters may both remove the same
-// stale file; that costs nothing). Released when this process exits, by which time the fate of its block has been
+// is atomic, so one process wins. Only a holder whose process is gone is stale; its file is removed only if it still
+// reads as that same holder, then the loop tries again. A live holder is never taken over: at NANO_LOCK_MAX_MS the
+// waiter refuses with exit 5 so an operator can investigate the holder. Released when this process exits, by which time the fate of its block has been
 // printed; a seller that serves before confirmation leaves the next writer's block in the "not confirmed yet" loop below.
 function walletLock(account) {
   if (process.env.NANO_LOCK === '0') return Promise.resolve();
   const file = path.join(process.env.NANO_LOCK_DIR || os.tmpdir(), 'pursekeeper-wallet-' + account + '.lock');
   const waitMs = Number(process.env.NANO_LOCK_WAIT_MS) > 0 ? Number(process.env.NANO_LOCK_WAIT_MS) : 120000;
   const maxMs = Number(process.env.NANO_LOCK_MAX_MS) > 0 ? Number(process.env.NANO_LOCK_MAX_MS) : 180000;
-  const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };   // Only ESRCH proves the holder is gone.
   const mine = process.pid + ' ' + Date.now();
   const start = Date.now();
   let told = false;
@@ -114,10 +114,14 @@ function walletLock(account) {
       let holder = ''; try { holder = fs.readFileSync(file, 'utf8'); } catch { continue; }   // gone between the two calls
       const [pidText, atText] = holder.trim().split(' ');
       const pid = Number(pidText), age = Date.now() - Number(atText);
-      if (!(pid > 0) || !alive(pid) || !(age < maxMs)) {
-        console.error('wallet lock on ' + account + ' is stale (' + (pid > 0 && alive(pid) ? 'pid ' + pid + ' has held it ' + Math.round(age / 1000) + ' s' : 'its process is gone') + '); taking it over');
+      if (!(pid > 0) || !alive(pid)) {
+        console.error('wallet lock on ' + account + ' is stale (its process is gone); taking it over');
         try { if (fs.readFileSync(file, 'utf8') === holder) fs.unlinkSync(file); } catch { /* removed by another waiter */ }
         continue;
+      }
+      if (!(age < maxMs)) {
+        console.error('refusing: wallet lock on ' + account + ' is held by live pid ' + pid + ' for ' + (Number.isFinite(age) ? age + ' ms' : 'an unknown time') + '; NANO_LOCK_MAX_MS=' + maxMs + '. Nothing signed. Inspect the holder; if it is hung, stop it before retrying.');
+        process.exit(5);
       }
       if (Date.now() - start >= waitMs) {
         console.error('refusing: waited ' + Math.round(waitMs / 1000) + ' s for the wallet lock on ' + account + ' (pid ' + pid + ' is mid-payment from this account). Nothing signed. Retry later, or give this process its own NANO_INDEX.');
