@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.4
+version: 0.3.5
 metadata:
   openclaw:
     requires:
@@ -18,7 +18,7 @@ metadata:
         description: Optional path. After a scripts/client-x402.js call, the PAYMENT-SIGNATURE header value is written there (mode 600) with the url, block hash and final status, so the same payment can be re-presented as proof of purchase. Until the block is on the chain the file is a spendable signed send; leave unset unless a seller's download route needs it.
       - name: NANO_LOCK
         required: false
-        description: scripts/client-x402.js holds a per-account lock on this host from the frontier read until the fate of its block is known, so several processes paying from one seed sign one block at a time instead of competing blocks against one frontier. Default on; NANO_LOCK=0 turns it off. NANO_LOCK_DIR (default the system temp dir), NANO_LOCK_WAIT_MS (default 120000, then exit 5 with nothing signed) and NANO_LOCK_MAX_MS (default 180000: a holder whose process is gone is taken over; a live holder that has held the lock this long is never taken over, the waiter exits 5 at once naming the pid, so an operator can look at it) tune it. Processes on two hosts sharing a seed are not covered; give each writer its own NANO_INDEX.
+        description: scripts/client-x402.js holds a per-account lock on this host from the frontier read until the fate of its block is known, so several processes paying from one seed sign one block at a time instead of competing blocks against one frontier. Default on; NANO_LOCK=0 turns it off. NANO_LOCK_DIR (default the system temp dir), NANO_LOCK_WAIT_MS (default 120000, then exit 5 with nothing signed) and NANO_LOCK_MAX_MS (default 180000: a holder whose process is gone is taken over; a live holder that has held the lock this long is never taken over, the waiter exits 5 at once naming the pid, so an operator can look at it; a record with no valid pid, which may be a holder still writing it, is never removed: the waiter polls to NANO_LOCK_WAIT_MS, then exits 5 naming the file for an operator to check and delete by hand) tune it. Processes on two hosts sharing a seed are not covered; give each writer its own NANO_INDEX.
       - name: NANO_CAP
         required: false
         description: Cumulative spending cap for scripts/inference-proxy.js in NANO as decimal text, over the life of its state file. The proxy refuses to start without it.

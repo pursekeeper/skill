@@ -8,7 +8,7 @@
 //      NANO_MAX_PAY (spending cap in NANO as decimal text, default 0.01; a 402 quote above it is refused, nothing signed, exit 3),
 // Exit codes: 0 when the call was served (2xx), 1 when it ended on any other status or threw, 2 without a seed, 3 above the cap,
 //      4 when the seller's 402 resource breaks the x402 v2 ResourceInfo caps (nothing signed; the seller has to fix the 402),
-//      5 when the wallet lock wait reaches NANO_LOCK_WAIT_MS, or a live holder reaches NANO_LOCK_MAX_MS (nothing signed).
+//      5 when the wallet lock wait reaches NANO_LOCK_WAIT_MS (including a missing/invalid holder PID), or a live holder reaches NANO_LOCK_MAX_MS (nothing signed).
 //      NANO_LOCK (the per-account lock below; default on, NANO_LOCK=0 turns it off), NANO_LOCK_DIR (where the lock file
 //      lives, default the system temp dir), NANO_LOCK_WAIT_MS (how long to wait for it, default 120000), NANO_LOCK_MAX_MS
 //      (refuse immediately if a live holder has held it this long; never take over a live holder; default 180000),
@@ -95,8 +95,10 @@ async function work(hash, origin) {
 }
 
 // The per-account lock (see the header). A file created with O_EXCL under NANO_LOCK_DIR holding "pid startMs": the create
-// is atomic, so one process wins. Only a holder whose process is gone is stale; its file is removed only if it still
-// reads as that same holder, then the loop tries again. A live holder is never taken over: at NANO_LOCK_MAX_MS the
+// is atomic, so one process wins. Only a valid positive PID whose process is gone is stale; its file is removed only
+// if it still reads as that same holder, then the loop tries again. An empty or invalid-PID record may belong to a
+// holder still writing it: wait up to NANO_LOCK_WAIT_MS without removing it, then refuse for manual inspection.
+// A live holder is never taken over: at NANO_LOCK_MAX_MS the
 // waiter refuses with exit 5 so an operator can investigate the holder. Released when this process exits, by which time the fate of its block has been
 // printed; a seller that serves before confirmation leaves the next writer's block in the "not confirmed yet" loop below.
 function walletLock(account) {
@@ -114,7 +116,18 @@ function walletLock(account) {
       let holder = ''; try { holder = fs.readFileSync(file, 'utf8'); } catch { continue; }   // gone between the two calls
       const [pidText, atText] = holder.trim().split(' ');
       const pid = Number(pidText), age = Date.now() - Number(atText);
-      if (!(pid > 0) || !alive(pid)) {
+      // An O_EXCL create can be visible before its contents. An unreadable PID is not proof of a dead holder.
+      const hasPid = Number.isInteger(pid) && pid > 0 && pid <= 0x7fffffff;
+      if (!hasPid) {
+        if (Date.now() - start >= waitMs) {
+          console.error('refusing: waited ' + Math.round(waitMs / 1000) + ' s for the wallet lock at ' + file + ' (no PID available). Nothing signed. Check for running clients using this account; only if none are running, manually remove this lock file and retry.');
+          process.exit(5);
+        }
+        if (!told) { console.error('waiting for the wallet lock at ' + file + ': no PID available; leaving the file in place'); told = true; }
+        await new Promise(s => setTimeout(s, 150 + Math.random() * 150));
+        continue;
+      }
+      if (!alive(pid)) {
         console.error('wallet lock on ' + account + ' is stale (its process is gone); taking it over');
         try { if (fs.readFileSync(file, 'utf8') === holder) fs.unlinkSync(file); } catch { /* removed by another waiter */ }
         continue;
