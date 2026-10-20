@@ -109,7 +109,7 @@ function mockDoor(node, opts) {
     }
     // nano dialect
     const id = opts.fixedId || ('pay_' + randomBytes(6).toString('hex'));
-    const base = opts.completeHost ? `http://${opts.completeHost}` : `http://${host}`;
+    const base = opts.completeHost ? `http://${opts.completeHost}` : `${opts.completeProtocol || 'http:'}//${host}`;
     const a = { scheme: 'nano', protocolScheme: 'nano', network: opts.network || 'nano-mainnet', amount: String(st.amount), payTo, paymentId: id,
       expiresAt: opts.expired ? new Date(Date.now() - 1000).toISOString() : new Date(Date.now() + 900000).toISOString(), statusUrl: `${base}/status/${id}`, completeUrl: `${base}/complete/${id}` };
     if (opts.malformed === 'amount') a.amount = 'abc';
@@ -213,6 +213,17 @@ test('host binding: a completeUrl on another host is refused even when the amoun
   assert.equal(r.status, 402);
   assert.equal((await r.json()).payer.code, 'host_mismatch');
   assert.equal(s.node.st.processed.length, 0);
+});
+
+test('protocol binding: a completeUrl on the door\'s host but another protocol is refused before anything is signed', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI, completeProtocol: 'https:' });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 402);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'protocol_mismatch');
+  assert.equal(j.payer.detail.protocol, 'https:');
+  assert.equal(s.node.st.processed.length, 0);
+  assert.equal((await s.stateOf()).spent, '0');
 });
 
 test('restart: the spend survives in the state file and the cap still holds', async t => {

@@ -78,7 +78,7 @@ const cfg = (() => {
   const account = N.deriveAddress(pub, { useNanoPrefix: true });
   return {
     keyHash,
-    upstream, host: u.host, cap, perCall, allow, port, sk, pub, account,
+    upstream, host: u.host, protocol: u.protocol, cap, perCall, allow, port, sk, pub, account,
     state: process.env.STATE_FILE || path.join(os.homedir(), '.pursekeeper', `inference-proxy-${port}.json`),
     rpc: process.env.NANO_RPC || null,
     api: (process.env.API || 'https://pursekeeper.dev').replace(/\/$/, ''),
@@ -285,8 +285,11 @@ function decide(q) {
   if (amount <= 0n) throw new Refuse('malformed_quote', { field: 'amount', value: q.amount });
   if (q.kind === 'nano') {
     for (const [k, u] of [['completeUrl', q.completeUrl], ['statusUrl', q.statusUrl]]) {
-      let h; try { h = new URL(String(u)).host; } catch { throw new Refuse('malformed_quote', { field: k }); }
-      if (h !== cfg.host) throw new Refuse('host_mismatch', { field: k, host: h, upstream: cfg.host });
+      let p; try { p = new URL(String(u)); } catch { throw new Refuse('malformed_quote', { field: k }); }
+      if (p.host !== cfg.host) throw new Refuse('host_mismatch', { field: k, host: p.host, upstream: cfg.host });
+      // Same host is not enough: a quote naming http:// on an https door would carry the chat (and the signed block)
+      // in clear. The URL's protocol must be the door's (ClawHub's scanner on 0.3.5, 2026-10-20).
+      if (p.protocol !== cfg.protocol) throw new Refuse('protocol_mismatch', { field: k, protocol: p.protocol, upstream: cfg.protocol });
     }
     if (!q.paymentId) throw new Refuse('malformed_quote', { field: 'paymentId' });
     // One payment id is paid at most once by this state file. A repeated id is a replay whatever the door says, and an
@@ -305,8 +308,9 @@ function decide(q) {
     for (const [k, v] of [['resource', q.pr && q.pr.resource], ['accepts.resource', q.accepted && q.accepted.resource]]) {
       if (v === undefined || v === null) continue;
       const u = typeof v === 'object' ? v.url : v;
-      let h; try { h = new URL(String(u)).host; } catch { throw new Refuse('malformed_quote', { field: k }); }
-      if (h !== cfg.host) throw new Refuse('resource_mismatch', { field: k, host: h, upstream: cfg.host });
+      let p; try { p = new URL(String(u)); } catch { throw new Refuse('malformed_quote', { field: k }); }
+      if (p.host !== cfg.host) throw new Refuse('resource_mismatch', { field: k, host: p.host, upstream: cfg.host });
+      if (p.protocol !== cfg.protocol) throw new Refuse('protocol_mismatch', { field: k, protocol: p.protocol, upstream: cfg.protocol });
     }
   }
   if (cfg.allow.length && !cfg.allow.includes(q.payTo)) throw new Refuse('payto_not_allowed', { payTo: q.payTo });
