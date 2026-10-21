@@ -148,7 +148,7 @@ async function stand(t, doorOpts, envExtra) {
   const shut = srv => { srv.close(); srv.closeAllConnections(); };
   t.after(async () => { await proxy.stop(); shut(node.srv); shut(door.srv); await rm(dir, { recursive: true, force: true }); });
   const call = (body, headers, path) => fetch(`http://127.0.0.1:${proxy.port}${path || '/v1/chat/completions'}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY, ...headers }, body: JSON.stringify(body) });
-  const stateOf = () => fetch(`http://127.0.0.1:${proxy.port}/_nano/state`).then(r => r.json());
+  const stateOf = () => fetch(`http://127.0.0.1:${proxy.port}/_nano/state`, { headers: { authorization: 'Bearer ' + KEY } }).then(r => r.json());
   return { seed, account, pub, node, door, proxy, env, dir, call, stateOf, restart: async () => { await proxy.stop(); const p2 = await startProxy(env, dir); t.after(() => p2.stop()); return p2; } };
 }
 
@@ -235,7 +235,7 @@ test('restart: the spend survives in the state file and the cap still holds', as
   const r = await call2();
   assert.equal(r.status, 402);
   assert.equal((await r.json()).payer.code, 'cap_exceeded');
-  const st = await fetch(`http://127.0.0.1:${p2.port}/_nano/state`).then(x => x.json());
+  const st = await fetch(`http://127.0.0.1:${p2.port}/_nano/state`, { headers: { authorization: 'Bearer ' + KEY } }).then(x => x.json());
   assert.equal(st.spent, '0.008'); assert.equal(st.paid, 2);
   assert.equal(s.node.st.processed.length, 2);
 });
@@ -418,7 +418,7 @@ test('a send signed by a run that died before broadcasting is settled at start-u
   await writeFile(file, JSON.stringify(raw));
   const p2 = await s.restart();
   let st;
-  for (let i = 0; i < 40; i++) { st = await fetch(`http://127.0.0.1:${p2.port}/_nano/state`).then(r => r.json()); if (st.payments[1].final) break; await new Promise(r => setTimeout(r, 100)); }
+  for (let i = 0; i < 40; i++) { st = await fetch(`http://127.0.0.1:${p2.port}/_nano/state`, { headers: { authorization: 'Bearer ' + KEY } }).then(r => r.json()); if (st.payments[1].final) break; await new Promise(r => setTimeout(r, 100)); }
   assert.equal(st.spent, '0.001', 'the dead send is uncounted, the real one stays');
   assert.equal(st.payments[1].status, 'signed'); assert.equal(st.payments[1].counted, false); assert.equal(st.payments[1].final, true);
   assert.equal(s.node.st.processed.map(p => p.subtype).join(','), 'send,change');
@@ -580,6 +580,25 @@ test('PROXY_KEY: a /v1 request without the key, or with a wrong one, is refused 
   assert.equal(s.node.st.processed.length, 1);
   // state is readable without the key (nothing secret in it), /v1 is not
   assert.equal((await s.stateOf()).paid, 1);
+});
+
+test('the state readout needs the key: 401 proxy_key without it, 200 as a bearer and as x-api-key, nothing counted', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI });
+  const url = `http://127.0.0.1:${s.proxy.port}/_nano/state`;
+  const bare = await fetch(url);
+  assert.equal(bare.status, 401);
+  assert.equal(bare.headers.get('x-payer-refused'), 'proxy_key');
+  const wrong = await fetch(url, { headers: { authorization: 'Bearer not-the-key-0123456789abcdef' } });
+  assert.equal(wrong.status, 401);
+  assert.equal((await bare.text()).includes('payments'), false, 'no state in the refusal');
+  const bearer = await fetch(url, { headers: { authorization: 'Bearer ' + KEY } });
+  assert.equal(bearer.status, 200);
+  const viaApiKey = await fetch(url, { headers: { 'x-api-key': KEY } });
+  assert.equal(viaApiKey.status, 200);
+  const st = await viaApiKey.json();
+  assert.equal(st.calls, 0, 'a state read is not a call');
+  assert.equal(st.payments.length, 0);
+  assert.equal(s.door.st.served, 0);
 });
 
 test('browser shapes are refused 403 before the key is even read: a non-loopback Host (DNS rebinding) and any Origin header (no-preflight POST), on /v1 and on /_nano/state', async t => {
