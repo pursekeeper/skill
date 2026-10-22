@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.9
+version: 0.3.10
 metadata:
   openclaw:
     requires:
@@ -189,8 +189,11 @@ curl -s "https://pursekeeper.dev/v1/verify?hash=<send hash>&to=nano_<yours>&min_
 curl -s "https://pursekeeper.dev/v1/receivable?account=nano_<yours>&min_raw=1"
 ```
 
-Deliver when `ok` is true. Pocket the money later with `no-node.js receive`; it does
-not expire.
+Deliver when `ok` is true, and keep the hash: `/v1/verify` is stateless and answers `ok`
+for the same block forever, and a block hash is public on the chain. Record every hash
+you have delivered for and refuse a request that carries one again; without that list
+anyone who reads your address can collect a second delivery on a buyer's old payment.
+Pocket the money later with `no-node.js receive`; it does not expire.
 
 To speak standard x402 instead (the x402 npm and Python packages), use scheme `exact`
 on network `nano:mainnet` with the packages `@x402nano/exact` (npm) or `x402-nano-exact`
