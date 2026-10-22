@@ -76,6 +76,7 @@ function mockDoor(node, opts) {
       out(200, { 'x-x402-reconciliation-amount': '0.000001' }, JSON.stringify(opts.completion || { id: 'c1', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { total_tokens: 2 } }));
     };
     if (req.url.startsWith('/status/')) {
+      if (opts.statusRedirect) return out(302, { location: opts.statusRedirect }, '');   // a door that sends the poll elsewhere
       const q = st.quotes[req.url.slice('/status/'.length)];
       const paid = q && node.st.processed.some(p => p.subtype === 'send' && p.link === N.derivePublicKey(q.payTo).toUpperCase() && p.amount === BigInt(q.amount));
       return out(200, {}, JSON.stringify(paid ? { status: 'paid', readyToComplete: true } : { status: 'pending', readyToComplete: false }));
@@ -88,6 +89,7 @@ function mockDoor(node, opts) {
       const paid = node.st.processed.find(p => p.subtype === 'send' && p.link === N.derivePublicKey(q.payTo).toUpperCase() && p.amount === BigInt(q.amount));
       if (!paid) return out(402, {}, '{"error":"not paid"}');
       if (req.headers['x-x402-payment-id'] !== id || body !== q.body) return out(400, {}, '{"error":"body or id mismatch"}');
+      if (opts.completeRedirect) return out(307, { location: opts.completeRedirect }, '');   // paid, then sent elsewhere
       return serve();
     }
     if (!req.url.startsWith('/v1/')) return out(404, {}, '{}');
@@ -636,4 +638,43 @@ test('browser shapes are refused 403 before the key is even read: a non-loopback
   const paid = await at('/v1/chat/completions', { host: 'localhost:' + s.proxy.port });
   assert.equal(paid.status, 200, await paid.text());
   assert.equal(s.node.st.processed.length, 1);
+});
+
+// ---- a door's redirects: never followed by the poll, never relayed after payment (ClawHub scanner on 0.3.10, 2026-10-22) ----
+async function trap() {
+  // a listener standing in for something on the operator's local network; records every hit
+  const hits = [];
+  const srv = createServer((req, res) => { hits.push(req.url); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"status":"paid","readyToComplete":true}'); });
+  const url = await listen(srv);
+  return { srv, url, hits };
+}
+
+test('status poll: a 302 from the door is not followed; nothing reaches the redirect target, the call completes on the complete step', async t => {
+  const tr = await trap();
+  t.after(() => { tr.srv.close(); tr.srv.closeAllConnections(); });
+  const s = await stand(t, { mode: 'nano', amount: MILLI, statusRedirect: tr.url + '/internal' });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 200, await r.text());
+  assert.equal(tr.hits.length, 0, 'the redirect target was never contacted');
+  assert.equal(s.node.st.processed.length, 1);
+  assert.equal(s.door.st.completes.length, 1);
+  assert.equal((await s.stateOf()).payments[0].status, 'served');
+});
+
+test('complete step: a 307 after payment is refused as door_redirect with the hash, never relayed, paid exactly once', async t => {
+  // the door sends the paid runtime elsewhere (here: back at a proxy-shaped loopback origin); a relayed 307 would make a
+  // following client pay again, a refusal cannot
+  const s = await stand(t, { mode: 'nano', amount: MILLI, completeRedirect: 'http://127.0.0.1:3402/v1/chat/completions' });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 502);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'door_redirect');
+  assert.equal(j.payer.detail.status, 307);
+  assert.equal(j.payer.detail.location_origin, 'http://127.0.0.1:3402');
+  assert.equal(typeof j.payer.detail.hash, 'string');
+  assert.equal(s.node.st.processed.length, 1, 'paid exactly once');
+  assert.equal(s.door.st.completes.length, 1);
+  const st = await s.stateOf();
+  assert.equal(st.payments[0].status, 'paid_not_served');
+  assert.equal(st.payments[0].hash, j.payer.detail.hash);
 });
