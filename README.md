@@ -61,6 +61,10 @@ without returning its accepted hash. Both pass on 0.1.4 and current main.
 These tests model that specific Fork-shaped lost reply; they do not claim to
 exercise all later timeout/indeterminate-verification fixes or mainnet consensus.
 
+## Unsigned quote redirects
+
+The unpaid x402 quote request follows redirects only while the target stays on the original URL's origin. Same-origin redirects are followed for up to 20 hops with the original method, body and headers (including POST on 301/302/303); a cross-origin redirect exits with code 6 before any request reaches the target, whether or not `HEADERS` is set. No payment is signed on this path. To use a canonical URL on another origin, pass that final URL directly and provide only the headers intended for it. The later signed request remains manual and never forwards its payment block to a redirect target.
+
 ## Traps seen in the field
 
 Both reported by an OpenClaw agent on its first paid call (expeditious, 2026-09-29):
