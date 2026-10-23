@@ -25,7 +25,13 @@ function mockNode(account, publicKey, initial) {
   const srv = createServer(async (req, res) => {
     const b = JSON.parse(await readBody(req) || '{}');
     const out = o => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
-    if (b.action === 'account_info') return st.accountError ? out({ error: st.accountError }) : out({ frontier: st.frontier, balance: st.balance.toString(), representative: account, block_count: String(st.height), confirmation_height: String(st.height), confirmed_frontier: st.frontier });   // every accepted block counts as confirmed at once
+    // every accepted block counts as confirmed at once. The confirmation fields follow the real node (nano-node
+    // json_handler.cpp, account_info): with include_confirmed, confirmed_height and confirmed_frontier; without it, the
+    // legacy confirmation_height and confirmation_height_frontier. Never both.
+    if (b.action === 'account_info') return st.accountError ? out({ error: st.accountError }) : out({ frontier: st.frontier, balance: st.balance.toString(), representative: account, block_count: String(st.height),
+      ...(b.include_confirmed === 'true' || b.include_confirmed === true
+        ? { confirmed_height: String(st.height), confirmed_frontier: st.frontier, confirmed_balance: st.balance.toString() }
+        : { confirmation_height: String(st.height), confirmation_height_frontier: st.frontier }) });
     if (b.action === 'work_generate') { st.workCalls++; return out({ work: WORK }); }
     if (b.action === 'receivable') return out({ blocks: st.receivable });
     if (b.action === 'block_info') return st.processed.some(p => p.hash === b.hash) ? out({ contents: {} }) : out({ error: 'Block not found' });
@@ -382,6 +388,27 @@ test('exact dialect: a seller that keeps the signed block and refuses cannot bro
   assert.equal(s.node.st.balance, 10n * RAW, 'nothing moved');
   assert.equal((await s.call(MSG, {}, '/v1/chat/completions')).status, 502, 'the door still refuses, a fresh send each time');
   assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('NANO_RPC mode reads the include_confirmed fields of the node: a retired send is released from the cap, and the next call is not blocked by it', async t => {
+  // A real node answers account_info with include_confirmed as confirmed_height / confirmed_frontier (no legacy
+  // confirmation_height). The proxy read only confirmation_height, got NaN, and never saw the change block confirmed at the
+  // retired send's height: the amount stayed counted for the life of the state file and every later call re-checked it.
+  const s = await stand(t, { mode: 'exact', amount: MILLI, keepUnbroadcast: true }, { NANO_CAP: '0.0015' });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 502);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'not_served_after_payment');
+  assert.match(j.payer.detail.invalidated_by, /^[0-9A-F]{64}$/, 'a change block took the height');
+  assert.equal(j.payer.detail.counted, false, 'the change block is confirmed on the node, so the send is released: ' + JSON.stringify(j.payer.detail));
+  const st = await s.stateOf();
+  assert.equal(st.spent, '0');
+  assert.equal(st.payments[0].final, true);
+  // cap 0.0015 leaves room for one 0.001 call: a send still counted would refuse this one as cap_exceeded
+  s.door.st.mode = 'nano';
+  const r2 = await s.call(MSG);
+  assert.equal(r2.status, 200, await r2.clone().text());
+  assert.equal((await s.stateOf()).spent, '0.001');
 });
 
 test('a retirement that cannot be published keeps the spend counted against the cap until it can', async t => {
