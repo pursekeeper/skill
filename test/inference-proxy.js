@@ -104,10 +104,11 @@ function mockDoor(node, opts) {
     const payTo = opts.payTo || N.deriveAddress(N.derivePublicKey(randomBytes(32).toString('hex')), { useNanoPrefix: true });
     if (st.mode === 'exact') {
       const sig = req.headers['payment-signature'];
-      const accepts = [{ scheme: 'exact', network: opts.network || 'nano:mainnet', amount: String(st.amount), payTo, resource: opts.resource || `http://${host}${req.url}` }];
+      const accepts = [{ scheme: 'exact', network: opts.network || 'nano:mainnet', amount: String(st.amount), payTo, resource: opts.resource || `http://${host}${req.url}`, ...(opts.extra ? { extra: opts.extra } : {}) }];
       if (!sig) return out(402, { 'payment-required': Buffer.from(JSON.stringify({ x402Version: 2, resource: opts.resourceTop || `http://${host}${req.url}`, accepts })).toString('base64') }, '{"error":"payment required"}');
       const p = JSON.parse(Buffer.from(sig, 'base64').toString());
       const blk = p.payload.block;
+      if (opts.dropOnPaid) { st.held = blk; req.socket.destroy(); return; }
       if (opts.keepUnbroadcast) { st.held = blk; return out(500, {}, '{"error":"served nothing, broadcast nothing"}'); }   // a seller that pockets the signed block and refuses
       // the seller broadcasts
       const r = await fetch(node.url, { method: 'POST', body: JSON.stringify({ action: 'process', subtype: 'send', block: blk }) }).then(x => x.json());
@@ -704,4 +705,47 @@ test('complete step: a 307 after payment is refused as door_redirect with the ha
   const st = await s.stateOf();
   assert.equal(st.payments[0].status, 'paid_not_served');
   assert.equal(st.payments[0].hash, j.payer.detail.hash);
+});
+
+
+test('exact dialect: a connection drop after presenting PAYMENT-SIGNATURE retires the signed block and uncounts the spend', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, dropOnPaid: true });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 502);
+  const j = await r.json();
+  assert.equal(j.payer.code, 'not_served_after_payment');
+  assert.equal(j.payer.detail.status, null);
+  assert.equal(j.payer.detail.broadcast, false);
+  assert.equal(j.payer.detail.counted, false);
+  assert.match(j.payer.detail.invalidated_by, /^[0-9A-F]{64}$/);
+  const held = s.door.st.held;
+  assert.ok(held && held.signature, 'the seller received the signed block before dropping');
+  const late = await fetch(s.node.url, { method: 'POST', body: JSON.stringify({ action: 'process', subtype: 'send', block: held }) }).then(x => x.json());
+  assert.equal(late.hash, undefined, 'the held block is dead after change retirement');
+  assert.equal((await s.stateOf()).spent, '0');
+});
+
+test('insufficient_balance refuses before work or signing and does not poison paymentId as paymentid_replayed', async t => {
+  const s = await stand(t, { mode: 'nano', amount: MILLI, fixedId: 'pay_after_topup' });
+  s.node.st.balance = 0n;
+  const r1 = await s.call(MSG);
+  assert.equal(r1.status, 402);
+  assert.equal((await r1.json()).payer.code, 'insufficient_balance');
+  assert.equal(s.node.st.workCalls, 0, 'no work computed when balance is insufficient');
+  assert.equal((await s.stateOf()).payments.length, 0, 'no unsigned deciding entry persisted');
+  s.node.st.balance = 10n * RAW;
+  const r2 = await s.call(MSG);
+  assert.equal(r2.status, 200, 'same paymentId succeeds once funded');
+  assert.equal((await s.stateOf()).spent, '0.001');
+});
+
+test('xrb_/nano_ prefix normalization in NANO_ALLOW_PAYTO and payTo, plus extra.workOptional parity', async t => {
+  const payToNano = N.deriveAddress(N.derivePublicKey(randomBytes(32).toString('hex')), { useNanoPrefix: true });
+  const payToXrb = payToNano.replace(/^nano_/, 'xrb_');
+  const s = await stand(t, { mode: 'exact', amount: MILLI, payTo: payToXrb, extra: { workOptional: true } }, { NANO_ALLOW_PAYTO: payToNano });
+  const r = await s.call(MSG);
+  assert.equal(r.status, 200, await r.text());
+  assert.equal(s.node.st.workCalls, 0, 'extra.workOptional: true skips client work');
+  const st = await s.stateOf();
+  assert.equal(st.payments[0].payTo, payToNano);
 });

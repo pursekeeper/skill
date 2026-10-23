@@ -55,6 +55,7 @@ const b64 = s => Buffer.from(JSON.stringify(s)).toString('base64');
 const unb64 = s => JSON.parse(Buffer.from(s, 'base64').toString('utf8'));
 const sleep = ms => new Promise(s => setTimeout(s, ms));
 const log = (...a) => console.error(new Date().toISOString(), ...a);
+const normAddr = s => String(s ?? '').trim().replace(/^xrb_/, 'nano_');
 
 // ---- configuration, all read once; a missing control is a refusal to start, not a default ----
 const cfg = (() => {
@@ -69,7 +70,7 @@ const cfg = (() => {
   if (cap === null || cap <= 0n) die('set NANO_CAP, the cumulative spending cap in XNO as decimal text (e.g. 0.1)');
   const perCall = toRaw(process.env.NANO_MAX_PER_CALL ?? '0.001');
   if (perCall === null || perCall <= 0n) die('NANO_MAX_PER_CALL must be a decimal XNO amount');
-  const allow = (process.env.NANO_ALLOW_PAYTO || '').split(',').map(s => s.trim()).filter(Boolean);
+  const allow = (process.env.NANO_ALLOW_PAYTO || '').split(',').map(normAddr).filter(Boolean);
   for (const a of allow) if (!N.checkAddress(a)) die('NANO_ALLOW_PAYTO: not a Nano address: ' + a);
   const port = Number(process.env.PORT || 3402);
   const keyHash = createHash('sha256').update(proxyKey).digest();
@@ -270,14 +271,14 @@ function parseQuote(status, headers, bodyText) {
     if (v.x402Version !== 2 || !Array.isArray(v.accepts)) throw new Refuse('malformed_quote', { field: 'x402Version' });
     const a = v.accepts.find(x => x.scheme === 'exact' && x.network === 'nano:mainnet');
     if (!a) throw new Refuse('no_nano_option', { accepts: v.accepts.map(x => `${x.scheme}/${x.network}`) });
-    return { kind: 'exact', payTo: a.payTo, amount: a.amount, pr: v, accepted: a, sellerWork: a.extra && a.extra.work === 'optional' };
+    return { kind: 'exact', payTo: normAddr(a.payTo), amount: a.amount, pr: v, accepted: a, sellerWork: !!(a.extra && (a.extra.work === 'optional' || a.extra.workOptional === true)) };
   }
   let j; try { j = JSON.parse(bodyText); } catch { throw new Refuse('malformed_quote', { field: 'body' }); }
   const list = j && j.payment && Array.isArray(j.payment.accepted) ? j.payment.accepted : null;
   if (list) {
     const a = list.find(x => x.scheme === 'nano' && /^nano[-:]mainnet$/.test(String(x.network)));
     if (!a) throw new Refuse('no_nano_option', { accepts: list.map(x => `${x.scheme}/${x.network}`) });
-    return { kind: 'nano', payTo: a.payTo, amount: a.amount, paymentId: a.paymentId || j.payment.paymentId, completeUrl: a.completeUrl || j.payment.completeUrl, statusUrl: a.statusUrl || j.payment.statusUrl, expiresAt: a.expiresAt || j.payment.expiresAt };
+    return { kind: 'nano', payTo: normAddr(a.payTo), amount: a.amount, paymentId: a.paymentId || j.payment.paymentId, completeUrl: a.completeUrl || j.payment.completeUrl, statusUrl: a.statusUrl || j.payment.statusUrl, expiresAt: a.expiresAt || j.payment.expiresAt };
   }
   if (j && j.x402 && j.x402.x402Version === 2) return parseQuote(402, new Map([['payment-required', b64(j.x402)]]), '');
   throw new Refuse('malformed_quote', { field: 'unknown dialect' });
@@ -444,12 +445,12 @@ async function handle(req, res) {
       const info = await accountInfo();
       if (info.error) throw new Refuse('account_unreadable', { error: info.error });
       if (!info.found) throw new Refuse('account_not_opened', { account: cfg.account });
+      if (BigInt(info.balance) < amount) throw new Refuse('insufficient_balance', { balance_raw: String(info.balance), amount_raw: String(amount) });
       const entry = { t: new Date().toISOString(), kind: quote.kind, amount_raw: amount.toString(), payTo: quote.payTo, paymentId: quote.paymentId || null, hash: null, status: 'deciding', counted: false, final: false, path: req.url };
-      state.payments.push(entry);
       if (quote.kind === 'nano') {
         const w = await work(info.frontier);
         const { block, hash } = signSend(info, amount, quote.payTo, w);
-        entry.hash = hash; entry.previous = info.frontier; entry.height = info.height + 1; entry.work = w; entry.status = 'signed'; count(entry, true); persist();   // counted before the network sees it
+        entry.hash = hash; entry.previous = info.frontier; entry.height = info.height + 1; entry.work = w; entry.status = 'signed'; state.payments.push(entry); count(entry, true); persist();   // counted before the network sees it
         try { await broadcast(block, 'send'); entry.status = 'broadcast'; entry.final = true; }
         catch (e) {
           let on; try { on = await landed(hash); } catch { on = null; }
@@ -468,18 +469,21 @@ async function handle(req, res) {
       // exact: sign, then present; the seller broadcasts. Counted at signing; a refusal is settled against the chain below.
       const w = quote.sellerWork ? '0' : await work(info.frontier);
       const { block, hash } = signSend(info, amount, quote.payTo, w);
-      entry.hash = hash; entry.previous = info.frontier; entry.height = info.height + 1; entry.work = w; entry.status = 'signed'; count(entry, true); persist();
+      entry.hash = hash; entry.previous = info.frontier; entry.height = info.height + 1; entry.work = w; entry.status = 'signed'; state.payments.push(entry); count(entry, true); persist();
       const payload = { x402Version: 2, resource: quote.pr.resource, accepted: quote.accepted, payload: { block } };
       const extra = { 'payment-signature': b64(payload) };
-      let r = await send(extra);
-      for (let waited = 0; r.status === 402 && waited < 60000; waited += 2000) {
-        const b = await r.clone().json().catch(() => null);
-        if (!b || !/not (yet )?confirmed/.test(String(b.note || b.error || ''))) break;
-        const tok = r.headers.get('x-nano-represent') || b.represent_token;
-        if (tok) extra['x-nano-represent'] = String(tok); else delete extra['x-nano-represent'];
-        await sleep(2000); r = await send(extra);
-      }
-      if (r.ok) { entry.status = 'served'; entry.final = true; state.paid++; persist(); return { entry, amount, response: r }; }
+      let r = null, sendErr = null;
+      try {
+        r = await send(extra);
+        for (let waited = 0; r.status === 402 && waited < 60000; waited += 2000) {
+          const b = await r.clone().json().catch(() => null);
+          if (!b || !/not (yet )?confirmed/.test(String(b.note || b.error || ''))) break;
+          const tok = r.headers.get('x-nano-represent') || b.represent_token;
+          if (tok) extra['x-nano-represent'] = String(tok); else delete extra['x-nano-represent'];
+          await sleep(2000); r = await send(extra);
+        }
+      } catch (e) { sendErr = e; r = null; }
+      if (r && r.ok) { entry.status = 'served'; entry.final = true; state.paid++; persist(); return { entry, amount, response: r }; }
       // Not served. Was the block broadcast? Landed: counted, reported with the hash and the seller's token. Not landed: the
       // seller still holds a valid signed block, so it is retired with a change block at the same height and uncounted once a
       // block is confirmed there. The payload is not kept: a refused call is a new quote and a new send, never a re-presentation.
@@ -488,7 +492,7 @@ async function handle(req, res) {
       if (on === true) { entry.final = true; entry.represent_token = extra['x-nano-represent'] || null; }
       persist();
       if (on === false) await settlePending([entry]);
-      throw new Refuse('not_served_after_payment', { status: r.status, hash, broadcast: on, counted: !!entry.counted, invalidated_by: entry.invalidated_by || null, body: (await r.text().catch(() => '')).slice(0, 300) });
+      throw new Refuse('not_served_after_payment', { status: r ? r.status : null, ...(sendErr ? { error: sendErr.message } : {}), hash, broadcast: on, counted: !!entry.counted, invalidated_by: entry.invalidated_by || null, body: r ? (await r.text().catch(() => '')).slice(0, 300) : '' });
     });
   } catch (e) {
     if (e instanceof Refuse) return refuse(res, e.code === 'not_served_after_payment' ? 502 : 402, e.code, e.detail);
