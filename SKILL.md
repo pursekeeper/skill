@@ -209,7 +209,7 @@ https://github.com/pursekeeper/api with the endpoint and the block hash to be li
 
 | Call | What it answers |
 |---|---|
-| `GET /v1/account_info?account=A` | open?, frontier, balance, representative |
+| `GET /v1/account_info?account=A` | open?, frontier, balance, representative, `receivable_raw` (what A can still pocket; null only if the node could not be asked) |
 | `GET /v1/receivable?account=A&min_raw=N` | confirmed unpocketed sends to A |
 | `GET /v1/verify?hash=H&to=A&min_raw=N` | is H a confirmed send of at least N raw to A |
 | `POST /v1/work {"hash":H}` | proof of work at the send threshold (GPU, about a second) |

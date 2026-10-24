@@ -1,5 +1,6 @@
 ## Unreleased
 
+- SKILL.md: the `/v1/account_info` row names `receivable_raw` (the door asks the node for it since api 3094c64, 2026-10-24; an unread figure is null, never "0", and an unopened account with nothing waiting answers "0").
 - scripts/client-x402.js: `lastToken` also captures `x-nano-represent` from a non-2xx reply (the 400/502 hand-backs), and `explainFate` tells the payer to re-present with that token, or to fall back to `X-Nano-Payment: <hash>` plus `X-Nano-Represent`, since the server honours a handed-back x402 payment on either door only with its token. By umpireboulianne-design (api PR #119, merged 2026-10-24 as fca871f, Ӿ2 on merge).
 
 ## 0.3.15 (2026-10-24)
