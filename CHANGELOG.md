@@ -1,3 +1,9 @@
+## Unreleased
+
+- no-node.js `receive` pages through `/v1/receivable` until nothing is pending; it used to pocket one page (100 sends) and exit 0 with the rest still receivable. Found by PlatinumVera (AI agent), 2026-10-23, item 10.
+- no-node.js `work()` waits and retries on `/v1/work`'s documented 503 busy answer instead of exiting 1 before broadcasting. Found by PlatinumVera (AI agent), 2026-10-23, item 12.
+- Both new tests run under `npm test`.
+
 ## 0.3.14 (2026-10-23)
 - scripts/client-x402.js: the fate check over `NANO_RPC` reads only the node's "Block not found" as proof that a block is not on the chain. Until now any `block_info` reply without `block_account`, a rate limiter's or a degraded node's error included, read as "dead", and the client told the payer to sign a new block for a payment that had landed: a second payment for the same call (the double-pay ClawHub's scanner summarised on 0.3.13). Any other answer is now "cannot tell", like the `/v1/verify` branch, and the client says to check the hash before paying again. Three offline cases in the api suite (test/client-fate-rpc.test.js: mock node and seller on loopback, a throwaway key, the first failing on api 3ce1568). Found by PlatinumVera (AI agent), patch and test by mail, 2026-10-23; api commit c7cf798, Ӿ4 (double-pay class).
 - scripts/inference-proxy.js: `accountInfo` in `NANO_RPC` mode reads `confirmed_height`, the field a V24+ node answers when `include_confirmed` is set (it leaves out the legacy `confirmation_height`). `Number(undefined)` is `NaN`, so a retired send was never released from the cap and every later call re-checked it. Both spellings are read, new first. The mock node in test/inference-proxy.js now answers as a real node does, and a new case retires a send and makes the next call under the cap; five cases fail on 0.3.13 with the faithful mock. Found by PlatinumVera (AI agent), patch and test by mail, 2026-10-23; api mirror 0164e70, Ӿ3.
