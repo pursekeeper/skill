@@ -1,3 +1,7 @@
+## Unreleased
+
+- scripts/client-x402.js: `lastToken` also captures `x-nano-represent` from a non-2xx reply (the 400/502 hand-backs), and `explainFate` tells the payer to re-present with that token, or to fall back to `X-Nano-Payment: <hash>` plus `X-Nano-Represent`, since the server honours a handed-back x402 payment on either door only with its token. By umpireboulianne-design (api PR #119, merged 2026-10-24 as fca871f, Ӿ2 on merge).
+
 ## 0.3.15 (2026-10-24)
 
 - scripts/inference-proxy.js: an `exact`-transport drop after the block is broadcast (the seller's socket closes, a timeout, a reset) is settled inside the same call: the send is caught, the entry keeps its hash and is reported as `not_served_after_payment` with the transport error named, instead of the exception escaping before the refusal was written, which left the entry counted with no fate for the operator to act on. A payment entry is pushed to the state only once it is signed, so a refusal before signing never leaves an unsigned entry deciding the cap. `insufficient_balance` is refused before any work is generated when the account holds less than the quote. `xrb_` addresses in the quote and in `NANO_ALLOW_PAYTO` are read as `nano_`, and a seller's `extra.workOptional: true` (the spelling in Kilkelly's x402 scheme draft) is read like `extra.work: "optional"`. Three new cases in test/inference-proxy.js. By umpireboulianne-design (skill PR #8, merged 2026-10-23 21:30Z as 6eb23bc, Ӿ2 on merge, ledger entry 471).
