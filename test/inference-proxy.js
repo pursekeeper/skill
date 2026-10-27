@@ -103,6 +103,13 @@ function mockDoor(node, opts) {
     const host = req.headers.host;
     const payTo = opts.payTo || N.deriveAddress(N.derivePublicKey(randomBytes(32).toString('hex')), { useNanoPrefix: true });
     if (st.mode === 'exact') {
+      if (req.headers['x-nano-payment'] !== undefined) {
+        // a handed-back payment is served once on the landed hash with the token the hand-back carried
+        st.recoveryAttempts = (st.recoveryAttempts || 0) + 1; st.lastRecoveryHeaders = req.headers;
+        const hb = st.handedBack;
+        if (hb && !hb.used && !opts.rejectRecovery && req.headers['x-nano-payment'] === hb.hash && req.headers['x-nano-represent'] === hb.token) { hb.used = true; return serve(); }
+        return out(402, {}, '{"error":"no credit on that hash for this token"}');
+      }
       const sig = req.headers['payment-signature'];
       const accepts = [{ scheme: 'exact', network: opts.network || 'nano:mainnet', amount: String(st.amount), payTo, resource: opts.resource || `http://${host}${req.url}`, ...(opts.extra ? { extra: opts.extra } : {}) }];
       if (!sig) return out(402, { 'payment-required': Buffer.from(JSON.stringify({ x402Version: 2, resource: opts.resourceTop || `http://${host}${req.url}`, accepts })).toString('base64') }, '{"error":"payment required"}');
@@ -114,6 +121,11 @@ function mockDoor(node, opts) {
       const r = await fetch(node.url, { method: 'POST', body: JSON.stringify({ action: 'process', subtype: 'send', block: blk }) }).then(x => x.json());
       if (!r.hash) return out(402, {}, JSON.stringify({ error: 'rejected: ' + r.error }));
       if (opts.refuseAfterBroadcast) return out(500, {}, '{"error":"served nothing"}');
+      if (opts.handBack && !st.handedBack) {   // charged, then not served: the door hands the price back on the hash with a token
+        const landedHash = node.st.processed[node.st.processed.length - 1].hash;
+        st.handedBack = { hash: landedHash, token: 'tok-' + landedHash.slice(0, 12), used: false };
+        return out(502, { 'x-nano-represent': st.handedBack.token }, '{"error":"charged, then not served; handed back"}');
+      }
       return serve();
     }
     // nano dialect
@@ -748,4 +760,55 @@ test('xrb_/nano_ prefix normalization in NANO_ALLOW_PAYTO and payTo, plus extra.
   assert.equal(s.node.st.workCalls, 0, 'extra.workOptional: true skips client work');
   const st = await s.stateOf();
   assert.equal(st.payments[0].payTo, payToNano);
+});
+
+test('exact dialect: a handed-back call is served on the next call with the landed hash and the hand-back token, no second block (pyfile-toolkit, skill#10)', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, handBack: true });
+  const r1 = await s.call(MSG);
+  assert.equal(r1.status, 502);
+  const j = await r1.json();
+  assert.equal(j.payer.code, 'not_served_after_payment');
+  assert.equal(j.payer.detail.represent_token, s.door.st.handedBack.token, 'the 502 carries the token the door handed back');
+  let st = await s.stateOf();
+  assert.equal(st.payments[0].status, 'broadcast_not_served'); assert.equal(st.payments[0].represent_token, s.door.st.handedBack.token);
+  const r2 = await s.call(MSG);
+  assert.equal(r2.status, 200, await r2.text());
+  assert.equal(r2.headers.get('x-payer-recovered'), 'true');
+  assert.equal(r2.headers.get('x-payer-hash'), s.door.st.handedBack.hash);
+  assert.equal(s.node.st.processed.length, 1, 'one block in all');
+  assert.equal(s.door.st.served, 1);
+  st = await s.stateOf();
+  assert.equal(st.spent, '0.001'); assert.equal(st.payments.length, 1); assert.equal(st.payments[0].status, 'served_on_recovery');
+  const r3 = await s.call(MSG);   // nothing left to recover: a normal paid call with a fresh block
+  assert.equal(r3.status, 200); assert.equal(r3.headers.get('x-payer-recovered'), null);
+  assert.equal(s.node.st.processed.length, 2); assert.equal(s.door.st.recoveryAttempts, 1);
+});
+
+test('exact dialect: a recovery the door refuses is written on the entry once; the call pays fresh and the stale hand-back is never retried', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, handBack: true, rejectRecovery: true });
+  assert.equal((await s.call(MSG)).status, 502);
+  const r2 = await s.call(MSG);
+  assert.equal(r2.status, 200, await r2.text());
+  assert.equal(r2.headers.get('x-payer-recovered'), null);
+  assert.equal(s.node.st.processed.length, 2);
+  const st = await s.stateOf();
+  assert.equal(st.payments[0].status, 'broadcast_not_served'); assert.equal(st.payments[0].recovery.status, 402);
+  assert.equal(st.payments[1].status, 'served'); assert.equal(st.spent, '0.002');
+  assert.equal((await s.call(MSG)).status, 200);
+  assert.equal(s.door.st.recoveryAttempts, 1, 'one recovery attempt per hand-back');
+});
+
+test('a runtime-supplied X-Nano-Payment / X-Nano-Represent pair never reaches the door: the proxy recovers only on its own record', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, handBack: true });
+  assert.equal((await s.call(MSG)).status, 502);
+  const hb = s.door.st.handedBack;
+  const r = await s.call(MSG, { 'x-nano-payment': 'F'.repeat(64), 'x-nano-represent': 'forged' });
+  assert.equal(r.status, 200, await r.text());
+  assert.equal(r.headers.get('x-payer-recovered'), 'true');
+  assert.equal(s.door.st.lastRecoveryHeaders['x-nano-payment'], hb.hash);
+  assert.equal(s.door.st.lastRecoveryHeaders['x-nano-represent'], hb.token);
+  assert.equal(s.door.st.recoveryAttempts, 1);
+  const plain = await stand(t, { mode: 'exact', amount: MILLI });
+  assert.equal((await plain.call(MSG, { 'x-nano-payment': 'F'.repeat(64), 'x-nano-represent': 'forged' })).status, 200);
+  assert.equal(plain.door.st.recoveryAttempts || 0, 0, 'a forged pair on a plain call is dropped before the door');
 });

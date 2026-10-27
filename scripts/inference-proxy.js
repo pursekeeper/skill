@@ -331,7 +331,7 @@ function decide(q) {
 // and the proxy is the one paying. Until 0.2.3 only authorization and proxy-authorization were dropped, so a
 // runtime that sends its key as x-api-key forwarded it verbatim (pyfile-toolkit, api#89, 2026-10-10).
 const CREDENTIAL = ['authorization', 'proxy-authorization', 'x-api-key', 'api-key', 'x-auth-token', 'x-goog-api-key', 'cookie'];
-const HOP = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'content-length', ...CREDENTIAL, 'payment-signature', 'x-payment', 'x-nano-represent', 'x-x402', 'x-x402-payment-id']);
+const HOP = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'content-length', ...CREDENTIAL, 'payment-signature', 'x-payment', 'x-nano-payment', 'x-nano-represent', 'x-x402', 'x-x402-payment-id']);
 function doorHeaders(req, extra) {
   const h = {};
   for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k)) h[k] = Array.isArray(v) ? v.join(', ') : v;
@@ -406,6 +406,29 @@ function keyPresented(req) {
   return keyMatches(m && m[1]) || keyMatches(req.headers['x-api-key']);
 }
 
+// A call the door charged and then handed back (status broadcast_not_served with the door's token) is served without a
+// new block: the next call to the door first presents the landed hash as X-Nano-Payment with X-Nano-Represent,
+// the pair the door honours a handed-back x402 payment on (api PR #119). One attempt per hand-back: a refusal is written
+// on the entry and the call goes on to a fresh quote, since the credit is then not this proxy's to spend. Until 0.3.16
+// the token on the hand-back reply was not kept and no recovery was tried, so the next call signed a second block for
+// the same door (pyfile-toolkit, skill#10, 2026-10-27, offline repro: two broadcasts for one served call).
+async function recoverHandedBack(quote, send) {
+  // The proxy has one upstream, so every entry is for this door; the credit sits on the hash, not on a pay-to or a path.
+  const prior = state.payments.find(p => p.kind === 'exact' && p.status === 'broadcast_not_served' && p.represent_token && !p.recovery);
+  if (!prior) return null;
+  let r;
+  try { r = await send({ 'x-nano-payment': prior.hash, 'x-nano-represent': prior.represent_token }); }
+  catch (e) { prior.recovery = { t: new Date().toISOString(), error: e.message }; persist(); return null; }
+  if (r.ok) {
+    prior.status = 'served_on_recovery'; prior.final = true; prior.recovery = { t: new Date().toISOString(), status: r.status };
+    state.paid++; persist(); log('recovered ' + prior.hash + ': served on the handed-back payment, no new block');
+    return { entry: prior, amount: BigInt(prior.amount_raw), response: r, recovered: true };
+  }
+  prior.recovery = { t: new Date().toISOString(), status: r.status, body: (await r.text().catch(() => '')).slice(0, 200) };
+  persist(); log('recovery of ' + prior.hash + ' refused with ' + r.status + '; paying fresh');
+  return null;
+}
+
 async function handle(req, res) {
   const g = gate(req);
   if (g) return refuse(res, g.status, g.code, g.detail);
@@ -440,6 +463,7 @@ async function handle(req, res) {
   try {
     paid = await withLock(async () => {
       await settlePending();
+      if (quote.kind === 'exact') { const recovered = await recoverHandedBack(quote, send); if (recovered) return recovered; }
       const amount = decide(quote);                                 // first: nothing below runs for a refused quote
       await pocket();
       const info = await accountInfo();
@@ -488,11 +512,16 @@ async function handle(req, res) {
       // seller still holds a valid signed block, so it is retired with a change block at the same height and uncounted once a
       // block is confirmed there. The payload is not kept: a refused call is a new quote and a new send, never a re-presentation.
       let on; try { on = await landed(hash); } catch { on = null; }
+      // The reply that handed the call back carries the recovery token (header, or represent_token in the body); it is
+      // the key to being served on this payment later, so it is kept on the entry and told to the runtime.
+      const bodyText = r ? await r.text().catch(() => '') : '';
+      let finalTok = r ? (r.headers.get('x-nano-represent') || null) : null;
+      if (!finalTok && bodyText) { try { const b = JSON.parse(bodyText); if (b && b.represent_token) finalTok = String(b.represent_token); } catch { /* not JSON */ } }
       entry.status = on === true ? 'broadcast_not_served' : on === false ? 'not_broadcast_refused' : 'unknown';
-      if (on === true) { entry.final = true; entry.represent_token = extra['x-nano-represent'] || null; }
+      if (on === true) { entry.final = true; entry.represent_token = finalTok || extra['x-nano-represent'] || null; }
       persist();
       if (on === false) await settlePending([entry]);
-      throw new Refuse('not_served_after_payment', { status: r ? r.status : null, ...(sendErr ? { error: sendErr.message } : {}), hash, broadcast: on, counted: !!entry.counted, invalidated_by: entry.invalidated_by || null, body: r ? (await r.text().catch(() => '')).slice(0, 300) : '' });
+      throw new Refuse('not_served_after_payment', { status: r ? r.status : null, ...(sendErr ? { error: sendErr.message } : {}), hash, broadcast: on, represent_token: on === true ? entry.represent_token || null : null, counted: !!entry.counted, invalidated_by: entry.invalidated_by || null, body: bodyText.slice(0, 300) });
     });
   } catch (e) {
     if (e instanceof Refuse) return refuse(res, e.code === 'not_served_after_payment' ? 502 : 402, e.code, e.detail);
@@ -500,7 +529,7 @@ async function handle(req, res) {
     return refuse(res, 502, 'payment_error', { error: e.message });
   }
 
-  if (quote.kind === 'exact') return relay(res, paid.response, wantStream, { 'x-payer-paid': fmt(paid.amount), 'x-payer-hash': paid.entry.hash });
+  if (quote.kind === 'exact') return relay(res, paid.response, wantStream, { 'x-payer-paid': fmt(paid.amount), 'x-payer-hash': paid.entry.hash, ...(paid.recovered ? { 'x-payer-recovered': 'true' } : {}) });
   // nano: the money moved; complete the call outside the lock so the next request can pay in parallel.
   // The door sees the send a few seconds after the broadcast (NanoGPT: status "paid", readyToComplete true; a complete
   // posted before that answers 402 with the money already spent, seen 2026-10-10), so poll the status URL first, then
