@@ -812,3 +812,72 @@ test('a runtime-supplied X-Nano-Payment / X-Nano-Represent pair never reaches th
   assert.equal((await plain.call(MSG, { 'x-nano-payment': 'F'.repeat(64), 'x-nano-represent': 'forged' })).status, 200);
   assert.equal(plain.door.st.recoveryAttempts || 0, 0, 'a forged pair on a plain call is dropped before the door');
 });
+
+test('a handed-back payment on file is never presented to another door: after UPSTREAM changes each door recovers only its own entry (ClawScan T09 on 0.3.18)', async t => {
+  const s = await stand(t, { mode: 'exact', amount: MILLI, handBack: true });
+  assert.equal((await s.call(MSG)).status, 502);
+  const hb = s.door.st.handedBack;
+  let st = await s.stateOf();
+  assert.equal(st.payments[0].represent_token, hb.token); assert.equal(st.payments[0].door, new URL(s.env.UPSTREAM).origin, 'the entry names the door it was paid at');
+  await s.proxy.stop();
+  // the operator points the same proxy (same state file) at another seller, which also charges and hands back
+  const door2 = mockDoor(s.node, { mode: 'exact', amount: MILLI, handBack: true });
+  const door2Url = await listen(door2.srv);
+  t.after(() => { door2.srv.close(); door2.srv.closeAllConnections(); });
+  const post = port => fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY }, body: JSON.stringify(MSG) });
+  const read = port => fetch(`http://127.0.0.1:${port}/_nano/state`, { headers: { authorization: 'Bearer ' + KEY } }).then(r => r.json());
+  const p2 = await startProxy({ ...s.env, UPSTREAM: door2Url }, s.dir);
+  t.after(() => p2.stop());
+  assert.match(p2.log(), /was written for .*UPSTREAM is now .*1 handed-back payment\(s\) on file were paid at another door/);
+  assert.equal((await post(p2.port)).status, 502, 'a fresh payment at the new door, handed back by it');
+  assert.equal(door2.st.recoveryAttempts || 0, 0, 'the other door never sees the first door\'s hash and token');
+  assert.equal(s.node.st.processed.length, 2);
+  const hb2 = door2.st.handedBack;
+  const r2 = await post(p2.port);                       // the first door's entry sits ahead in the list and must not block this one
+  assert.equal(r2.status, 200, await r2.text());
+  assert.equal(r2.headers.get('x-payer-recovered'), 'true'); assert.equal(r2.headers.get('x-payer-hash'), hb2.hash);
+  assert.equal(door2.st.recoveryAttempts, 1);
+  assert.equal(door2.st.lastRecoveryHeaders['x-nano-payment'], hb2.hash); assert.equal(door2.st.lastRecoveryHeaders['x-nano-represent'], hb2.token);
+  st = await read(p2.port);
+  assert.equal(st.payments[0].status, 'broadcast_not_served'); assert.equal(st.payments[0].recovery, undefined, 'the first door\'s entry is untouched');
+  assert.equal(st.payments[1].status, 'served_on_recovery'); assert.equal(st.payments[1].door, new URL(door2Url).origin);
+  await p2.stop();
+  // back at the first door its hand-back is still there to be used, once
+  const p3 = await startProxy(s.env, s.dir);
+  t.after(() => p3.stop());
+  const r3 = await post(p3.port);
+  assert.equal(r3.status, 200, await r3.text());
+  assert.equal(r3.headers.get('x-payer-recovered'), 'true'); assert.equal(r3.headers.get('x-payer-hash'), hb.hash);
+  assert.equal(s.node.st.processed.length, 2, 'no third block'); assert.equal(hb.used, true);
+});
+
+test('a hand-back entry written before 0.3.19 names no door and is never presented from here, not even to a door quoting the same pay-to account; start-up names its hash', async t => {
+  const payTo = N.deriveAddress(N.derivePublicKey(randomBytes(32).toString('hex')), { useNanoPrefix: true });
+  const s = await stand(t, { mode: 'exact', amount: MILLI, handBack: true, payTo });
+  assert.equal((await s.call(MSG)).status, 502);
+  const hb = s.door.st.handedBack;
+  await s.proxy.stop();
+  const file = JSON.parse(await readFile(s.env.STATE_FILE, 'utf8'));
+  delete file.payments[0].door;                         // the shape 0.3.16 to 0.3.18 wrote
+  await writeFile(s.env.STATE_FILE, JSON.stringify(file));
+  const door2 = mockDoor(s.node, { mode: 'exact', amount: MILLI, payTo });   // another seller quoting the first seller's (public) account
+  const door2Url = await listen(door2.srv);
+  t.after(() => { door2.srv.close(); door2.srv.closeAllConnections(); });
+  const post = port => fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY }, body: JSON.stringify(MSG) });
+  const p2 = await startProxy({ ...s.env, UPSTREAM: door2Url }, s.dir);
+  t.after(() => p2.stop());
+  assert.ok(p2.log().includes('written before 0.3.19') && p2.log().includes(hb.hash), 'start-up names the entry for recovery by hand');
+  const r2 = await post(p2.port);
+  assert.equal(r2.status, 200, await r2.text());
+  assert.equal(r2.headers.get('x-payer-recovered'), null); assert.equal(door2.st.recoveryAttempts || 0, 0, 'quoting the same account does not draw the pair out');
+  await p2.stop();
+  const p3 = await startProxy(s.env, s.dir);            // the first door again: still not presented, the call pays
+  t.after(() => p3.stop());
+  assert.ok(p3.log().includes(hb.hash));
+  const r3 = await post(p3.port);
+  assert.equal(r3.status, 200, await r3.text());
+  assert.equal(r3.headers.get('x-payer-recovered'), null); assert.equal(hb.used, false);
+  assert.equal(s.node.st.processed.length, 3);
+  const st = await fetch(`http://127.0.0.1:${p3.port}/_nano/state`, { headers: { authorization: 'Bearer ' + KEY } }).then(r => r.json());
+  assert.equal(st.payments[0].status, 'broadcast_not_served'); assert.equal(st.payments[0].recovery, undefined, 'left as it was, for the operator');
+});

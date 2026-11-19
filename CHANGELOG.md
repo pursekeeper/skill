@@ -1,3 +1,14 @@
+## 0.3.19 (2026-11-19)
+
+One fix in `scripts/inference-proxy.js`, named by ClawHub's scan of 0.3.18 ("changing upstream can disclose another seller's payment recovery token"). Checked against the code and found right.
+
+- The proxy's state file is named after the port, so it survives a change of `UPSTREAM`. Since 0.3.16 a payment that a seller took and then handed back is kept there with the seller's token, and the next call presents hash and token to be served without paying again. The code presented them to whatever `UPSTREAM` was set at the time. After a change of seller, the new one would have received a pair that claims the old seller's owed service. Reproduced offline before the fix.
+- Every payment entry now names the origin it was paid at (`door`), and a hand-back is presented only to that origin. Entries for another door stay on file untouched and are used if the proxy is pointed back. The cap and the spend still carry over, as before. The proxy prints the change of upstream at start.
+- **Behaviour change for anyone upgrading with an unused hand-back on file:** entries written by 0.3.16 to 0.3.18 name no door and are no longer presented automatically, so the next call pays. They are listed by hash at start, and the pair can be presented by hand. Matching them by pay-to account was the first draft; a reviewer showed that any seller can quote another seller's account, which is public, and draw the pair out that way.
+- Not covered: two sellers behind one origin on different paths are one door to the proxy, as they already are to its host checks.
+- An independent review of the first draft (a second agent, given the diff) found the pay-to hole above and a test that a wrong implementation would have passed. Both are fixed; the tests now include a second door that hands back its own payment while the first door's entry sits ahead of it in the file.
+- test/inference-proxy.js: 41 cases, two new. `scripts/client-x402.js` is unchanged.
+
 ## 0.3.18 (2026-11-19)
 
 The unresolved-payment record: the guard ClawHub's scan of 0.3.16 proposed and its scan of 0.3.17 named as the chief risk. 0.3.17 described the gap; this closes it in `scripts/client-x402.js`.

@@ -25,6 +25,8 @@
 //      NANO_ALLOW_PAYTO (optional comma-separated accounts; when set, a quote's payTo must be on it;
 //                        NanoGPT issues a fresh account per payment, so leave it unset for that door),
 //      STATE_FILE (default ~/.pursekeeper/inference-proxy-<port>.json; spent, received, every payment),
+//                 (named after the port, so the cap survives a change of UPSTREAM; a handed-back payment on file is
+//                 presented only to the origin it was paid at, never to another one),
 //      PORT (default 3402; the proxy binds 127.0.0.1 only),
 //      NANO_RPC (optional node RPC; else the free endpoints at API, default https://pursekeeper.dev),
 //      WORK_URL (optional RPC-style work_generate endpoint; else API /v1/work, else local CPU, slow),
@@ -79,7 +81,7 @@ const cfg = (() => {
   const account = N.deriveAddress(pub, { useNanoPrefix: true });
   return {
     keyHash,
-    upstream, host: u.host, protocol: u.protocol, cap, perCall, allow, port, sk, pub, account,
+    upstream, host: u.host, protocol: u.protocol, origin: u.origin, cap, perCall, allow, port, sk, pub, account,
     state: process.env.STATE_FILE || path.join(os.homedir(), '.pursekeeper', `inference-proxy-${port}.json`),
     rpc: process.env.NANO_RPC || null,
     api: (process.env.API || 'https://pursekeeper.dev').replace(/\/$/, ''),
@@ -100,6 +102,19 @@ function persist() {
   const tmp = cfg.state + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state, null, 1), { mode: 0o600 });
   fs.renameSync(tmp, cfg.state);
+}
+// The state file is named after the port, not the door, so it outlives a change of UPSTREAM, and so does the cap, which
+// is the point of it. Its hand-backs do not carry over: each is presented only to the door it was paid at (recoverHandedBack).
+{
+  const handedBack = state.payments.filter(p => p && p.status === 'broadcast_not_served' && p.represent_token && !p.recovery);
+  const elsewhere = handedBack.filter(p => p.door && p.door !== cfg.origin), doorless = handedBack.filter(p => !p.door);
+  if (state.upstream !== cfg.upstream) {
+    console.error(`state file ${cfg.state} was written for ${state.upstream || 'a door it does not name'}; UPSTREAM is now ${cfg.upstream}. Cap and spend carry over.` +
+      (elsewhere.length ? ` ${elsewhere.length} handed-back payment(s) on file were paid at another door; they are kept for it and not presented here.` : ''));
+    state.upstream = cfg.upstream;
+  }
+  if (doorless.length) console.error(`${doorless.length} handed-back payment(s) on file were written before 0.3.19 and do not name the door they were paid at: ${doorless.map(p => p.hash).join(', ')}. ` +
+    'They are not presented automatically, so the next call pays. To use one, send X-Nano-Payment (the hash) and X-Nano-Represent (represent_token in the state file) to the door that handed it back.');
 }
 const spent = () => BigInt(state.spent_raw);
 // Every payment entry carries `counted`: whether its amount is inside spent_raw right now. Count and uncount only through this.
@@ -413,8 +428,12 @@ function keyPresented(req) {
 // the token on the hand-back reply was not kept and no recovery was tried, so the next call signed a second block for
 // the same door (pyfile-toolkit, skill#10, 2026-10-27, offline repro: two broadcasts for one served call).
 async function recoverHandedBack(quote, send) {
-  // The proxy has one upstream, so every entry is for this door; the credit sits on the hash, not on a pay-to or a path.
-  const prior = state.payments.find(p => p.kind === 'exact' && p.status === 'broadcast_not_served' && p.represent_token && !p.recovery);
+  // An entry is presented only to the door it was paid at. The hash and the token together claim that door's service, so
+  // sending them to another seller would hand it the claim, and the state file outlives a change of UPSTREAM. Since 0.3.19
+  // every entry names its door (the origin of UPSTREAM when it was paid). An older entry names none and is never presented
+  // from here: matching it by pay-to account would let any door trigger it by quoting that account, which is public.
+  // At its own door the credit sits on the hash, not on a pay-to or a path.
+  const prior = state.payments.find(p => p.kind === 'exact' && p.status === 'broadcast_not_served' && p.represent_token && !p.recovery && p.door === cfg.origin);
   if (!prior) return null;
   let r;
   try { r = await send({ 'x-nano-payment': prior.hash, 'x-nano-represent': prior.represent_token }); }
@@ -470,7 +489,7 @@ async function handle(req, res) {
       if (info.error) throw new Refuse('account_unreadable', { error: info.error });
       if (!info.found) throw new Refuse('account_not_opened', { account: cfg.account });
       if (BigInt(info.balance) < amount) throw new Refuse('insufficient_balance', { balance_raw: String(info.balance), amount_raw: String(amount) });
-      const entry = { t: new Date().toISOString(), kind: quote.kind, amount_raw: amount.toString(), payTo: quote.payTo, paymentId: quote.paymentId || null, hash: null, status: 'deciding', counted: false, final: false, path: req.url };
+      const entry = { t: new Date().toISOString(), kind: quote.kind, amount_raw: amount.toString(), payTo: quote.payTo, paymentId: quote.paymentId || null, hash: null, status: 'deciding', counted: false, final: false, path: req.url, door: cfg.origin };
       if (quote.kind === 'nano') {
         const w = await work(info.frontier);
         const { block, hash } = signSend(info, amount, quote.payTo, w);
