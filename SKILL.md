@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.19
+version: 0.3.20
 metadata:
   openclaw:
     requires:
@@ -176,7 +176,10 @@ that retries on a non-zero exit that 7 means "read the line", not "try again". T
 to know before sharing one wallet between workers: the URL, method and body are all that
 make two calls "the same", so if ten workers buy the identical call and one reply is lost
 after its payment landed, the workers behind it are refused until someone acknowledges
-that block; and one block offered for two different calls stands against both. Not
+that block; and one block offered for two different calls (it can happen only while the
+block has not been broadcast) stands against both until one of them is served on it:
+then the block has bought that call, the other has not been paid for, and its entry is
+dropped with a line on stderr saying so. Not
 covered: two hosts sharing one seed, a record someone deleted, `NANO_PENDING=0`, other
 wallet software spending from the same account, and calls that differ only in `HEADERS`.
 One account per writer (`NANO_INDEX`) is still the rule.
