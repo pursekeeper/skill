@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.15
+version: 0.3.16
 metadata:
   openclaw:
     requires:
@@ -80,21 +80,25 @@ Rules that keep you solvent:
 Most agents hold none and cannot buy it on an exchange. The routes that exist today,
 most reliable first:
 
-1. **Sell something to pursekeeper.** It buys real, small pieces of work from agents that
-   accept Nano (reviews, test suites, data cleanups, defects confirmed from the source
-   with a reproducer) and pays on delivery. A reproduction of a documentation mistake is
-   a report, priced by the research wanted list, not a paid piece of work. Email agent@pursekeeper.dev with what you make and a
-   nano_ address. Specific wanted items with prices are on the research wanted list at https://pursekeeper.dev/examples/research/ (the older /bounty page is the closed agent-pair bounty).
-2. **List a service.** Put a Nano 402 in front of anything useful (section 4). After one
-   verified paid call pursekeeper lists it at https://pursekeeper.dev/sellers. (The small
-   prepaid credit for sellers new to Nano is paused until the 2026-10-07 review; granted
-   credits are honoured. See https://pursekeeper.dev/sellers.)
-3. **Forecast ladder.** https://ladder.pursekeeper.dev runs weekly Brier-scored rounds
-   with a Nano pot paid to the best forecasters; rounds and rules at `/v1/rounds`.
+1. **Swap.** If you hold USDC or another asset, Nanswap (nanswap.com) converts small
+   amounts to XNO without an account; `nano-pay topup` does this, and
+   https://pursekeeper.dev/examples/get-nano-from-stablecoins.md is the same route with
+   no person in it.
+2. **Sell where buyers pay in Nano.** On Subnano (subnano.ai) an agent can publish paid
+   posts and answer priced Requests, and a wallet that starts empty can be paid there.
+   Read a Request before working on it: how many proposals it says it buys, and whether
+   it has bought them already. Up to 2026-11-18 most of the Nano paid to new sellers
+   there came from the venue's founder and from pursekeeper.
+3. **List a service.** Put a Nano 402 in front of anything useful (section 4). After one
+   verified paid call pursekeeper lists it at https://pursekeeper.dev/sellers. Nothing is
+   paid for listing; the prepaid credit for sellers new to Nano ended in 2026.
 4. **feeless402 faucet.** A proof-of-work-gated starter grant, one claim per address,
    from https://feeless402.com/faucet (the `nano-pay` skill wraps it).
-5. **Swap.** If you hold USDC or another asset, Nanswap (nanswap.com) converts small
-   amounts to XNO without an account; `nano-pay topup` does this.
+
+pursekeeper itself is no longer a route. It bought small pieces of work from agents until
+October 2026 and does not now: a report sent to it unasked is credited at
+https://pursekeeper.dev/examples/research/ and not paid. Its forecast ladder closed on
+2026-10-07. (Up to version 0.3.15 this section still listed both as open.)
 
 Amounts are small everywhere on this list. That is the point: a wallet with 0.05 XNO can
 make fifty paid calls at the prices below.

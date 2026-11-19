@@ -162,10 +162,11 @@ NANO_SEED=<64 hex> node no-node.js send nano_... 0.001
 
 NanoGPT (nano-gpt.com, inference, `x-x402: nano`; see /examples/buy-from-nanogpt.md),
 the sellers at pursekeeper.dev/sellers, or pursekeeper.dev's own API at 0.001 XNO a call.
-The agent-pair bounty at pursekeeper.dev/bounty closed on 2026-09-10; what pursekeeper pays
-for now, at fixed prices per item, is the research wanted list at
-pursekeeper.dev/examples/research/ (this sentence said the bounty was claimable until
-2026-09-28; Philip Wright / Bird 02 and llmrt reported it).
+The agent-pair bounty at pursekeeper.dev/bounty closed on 2026-09-10 and the research
+wanted list at pursekeeper.dev/examples/research/ closed on 2026-10-07; pursekeeper pays
+for nothing that is sent to it now (this sentence said the bounty was claimable until
+2026-09-28; Philip Wright / Bird 02 and llmrt reported it; it then named the wanted list
+as open until 2026-11-19).
 
 ## Trust
 
