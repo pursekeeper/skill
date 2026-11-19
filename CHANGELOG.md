@@ -1,3 +1,19 @@
+## 0.3.18 (2026-11-19)
+
+The unresolved-payment record: the guard ClawHub's scan of 0.3.16 proposed and its scan of 0.3.17 named as the chief risk. 0.3.17 described the gap; this closes it in `scripts/client-x402.js`.
+
+- Before the signed request is sent, the block's hash, its predecessor and the call it pays for (URL, method, SHA-256 of the body) go to `~/.pursekeeper/pending-<account>.json`, mode 600. No signature and no key are in it. `NANO_PENDING_DIR` moves it, `NANO_PENDING=0` turns it off. If it cannot be written the request is not sent (exit 7). The entry is removed when the call is served or the block is proven dead.
+- The next run from that account settles the record under the wallet lock, against the frontier it is about to sign on. Never-broadcast entries are kept and the new block names the same predecessor, so only one of them can land. Entries proven dead are dropped. An entry that is on the chain, or may be, stays: a different call goes ahead, the same call (URL, method, body) stops with **exit 7 and nothing signed**. `NANO_PENDING_ACK=<block hash>` pays again on purpose; after `NANO_PENDING_HOLD_H` hours (default 24) the entry moves to `unserved-<account>.jsonl` and stops blocking.
+- **Behaviour change for shared wallets:** workers that buy the identical call from one account are refused behind a payment that landed unserved, until it is acknowledged or the hold runs out. Before, they paid.
+- **"Dead" now needs proof.** The client used to call a block dead when the frontier was elsewhere and the node said "Block not found". A node that is behind says exactly that about a block that landed, and the advice printed was "sign a new block". Now dead means the node shows the block's predecessor with a different successor that is confirmed; anything less is "could not establish", and the same call is not signed again. Without `NANO_RPC` the reading comes from `GET /v1/verify`, which answers `successor` since today. A loose `/not found/` match on node errors (it also matched "Account not found") is narrowed to the node's own "Block not found".
+- Record changes are read-modify-write under an exclusive `.lock` file beside the record, so processes that do not share the wallet lock (`NANO_LOCK=0`, different `NANO_LOCK_DIR`) cannot write over each other's entries. One entry per block and call.
+- A `PAYMENT-RESPONSE` header that is not base64 JSON no longer throws before the reply is printed.
+- New exit code 7. A runtime that retries on any non-zero exit should not retry 7.
+- test/pending-guard.js: 21 offline cases against a fake seller and a fake node. 104 of 104 tests pass.
+- An independent review of the first draft (a second agent, given the diff and not the design notes) reproduced eight defects before release, among them: a different call in between removed the guard for the first; a stale node's "Block not found" dropped an entry whose block later landed; two processes without a shared lock lost one of two entries. Each is fixed and is a test. Left open and said in SKILL.md: calls that differ only in `HEADERS` are one call; the first payment of a pair is found by its call, so a seller that serves the same content under two URLs can still be paid twice.
+- Checked on the chain with the author's own test account against pursekeeper.dev through a proxy that drops the reply after the payment (blocks named in the release commit).
+- `scripts/inference-proxy.js` is a different program with its own state file and is unchanged.
+
 ## 0.3.17 (2026-11-19)
 
 No script changed. Three things ClawHub's scan of 0.3.16 named, each checked and found right.
