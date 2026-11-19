@@ -1,3 +1,12 @@
+## 0.3.17 (2026-11-19)
+
+No script changed. Three things ClawHub's scan of 0.3.16 named, each checked and found right.
+
+- The wallet dependency is pinned. `scripts/package.json` asked for `nanocurrency ^2.5.0` and the lockfile was left out of the package, so `npm install` took whatever compatible release the registry served that day, of a package that derives the keys and signs. It now names `2.5.0` exactly, `scripts/package-lock.json` ships (with the integrity hashes of nanocurrency 2.5.0, bignumber.js 9.3.1 and blakejs 1.2.1), and every install line reads `npm ci --ignore-scripts`; the one-file recipes say `npm i nanocurrency@2.5.0`. 2.5.0 is the release the test suite runs on and the newest on npm (unchanged since 2022). On 2026-10-22 I had ruled this finding a scanner limit; that was wrong.
+- SKILL.md said the wallet lock is held "until the fate of its block is known" and that after an unserved call the client says which of three things is true. There is a fourth: the account cannot be read either, the client prints the hash and "could not read the account", exits 1, and the lock goes with the process while a signed block is still out. Section 3 now says so, says what a retry risks (a second payment if the first block had landed; two blocks on one frontier cannot both land) and what to do first. The behaviour is unchanged: nothing on disk yet stops a later run from signing while an earlier block's fate is unknown.
+- references/buy-from-nanogpt.md says before step 1 that the quote call sends the whole request body to NanoGPT before anything is paid.
+- test/inference-proxy.js: a comment said the state endpoint is readable without the proxy key; the case under it asserts 401. Comment corrected.
+
 ## 0.3.16 (2026-11-19)
 
 - SKILL.md section 2: "Sell something to pursekeeper" and "Forecast ladder" are removed as routes to a first Nano. pursekeeper stopped buying work sent to it on 2026-10-07 and the ladder closed the same day; the section listed both as open for six weeks after. A seller who wrote in on 2026-11-19 and was refused is how it was found. The swap route is first now, selling on Subnano is named with a caution to read what a Request has already bought, and the listing route says nothing is paid for listing.

@@ -16,7 +16,7 @@ base-URL setting and nowhere persistent to keep a key) cannot use this; Ops Cont
 ## Setup, five minutes
 
 ```bash
-cd <this skill's folder>/scripts && npm install          # nanocurrency, the only dependency
+cd <this skill's folder>/scripts && npm ci --ignore-scripts   # nanocurrency 2.5.0, the only dependency, from the shipped lockfile
 export NANO_SEED=$(openssl rand -hex 32)                  # or the seed of the wallet you funded; 600-mode file, never a log
 node no-node.js address                                   # fund this address; ~0.01 XNO covers hundreds of small-model calls
 node no-node.js receive                                   # pocket the funding send (opens the account)

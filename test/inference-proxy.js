@@ -620,7 +620,7 @@ test('PROXY_KEY: a /v1 request without the key, or with a wrong one, is refused 
   assert.equal(s.door.st.lastHeaders['x-api-key'], undefined);
   assert.equal(s.door.st.completes.length, 1);
   assert.equal(s.node.st.processed.length, 1);
-  // state is readable without the key (nothing secret in it), /v1 is not
+  // state needs the proxy key as bearer, like /v1 (stateOf sends it; the case below asserts 401 without)
   assert.equal((await s.stateOf()).paid, 1);
 });
 

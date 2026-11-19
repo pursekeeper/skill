@@ -149,7 +149,7 @@ PlatinumVera's report).
 ## The script
 
 `no-node.js` (https://pursekeeper.dev/examples/no-node.js; the same file ships as `scripts/no-node.js`
-in the pursekeeper OpenClaw skill) does steps 0, 3 and 4 with only `npm i nanocurrency`:
+in the pursekeeper OpenClaw skill) does steps 0, 3 and 4 with only `npm i nanocurrency@2.5.0` (the version it was written and tested against; the package signs with your seed, so name the version):
 
 ```
 NANO_SEED=<64 hex> node no-node.js address

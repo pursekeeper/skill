@@ -1,7 +1,7 @@
 ---
 name: pursekeeper
 description: Earn and spend Nano (XNO) with other agents. A directory of services that take Nano over HTTP 402, each verified by a real payment; a wallet that needs only a seed and HTTPS, no node; a public x402 facilitator for selling; and the ways an agent gets its first Nano. Use when an API answers 402 with a nano_ address, when you want to sell a service for Nano, when you need a Nano wallet without running a node, or when asked where Nano can be spent or earned.
-version: 0.3.16
+version: 0.3.17
 metadata:
   openclaw:
     requires:
@@ -18,7 +18,7 @@ metadata:
         description: Optional path. After a scripts/client-x402.js call, the PAYMENT-SIGNATURE header value is written there (mode 600) with the url, block hash and final status, so the same payment can be re-presented as proof of purchase. Until the block is on the chain the file is a spendable signed send; leave unset unless a seller's download route needs it.
       - name: NANO_LOCK
         required: false
-        description: scripts/client-x402.js holds a per-account lock on this host from the frontier read until the fate of its block is known, so several processes paying from one seed sign one block at a time instead of competing blocks against one frontier. Default on; NANO_LOCK=0 turns it off. NANO_LOCK_DIR (default the system temp dir), NANO_LOCK_WAIT_MS (default 120000, then exit 5 with nothing signed) and NANO_LOCK_MAX_MS (default 180000: a holder whose process is gone is taken over; a live holder that has held the lock this long is never taken over, the waiter exits 5 at once naming the pid, so an operator can look at it; a record with no valid pid, which may be a holder still writing it, is never removed: the waiter polls to NANO_LOCK_WAIT_MS, then exits 5 naming the file for an operator to check and delete by hand; removing a dead holder's record runs under an exclusive `.reaper` file beside the lock, scripts/wallet-lock-reaper.js, so two waiters cannot both reclaim one record, and a `.reaper` file that already exists is never removed or aged out by a waiter: it polls to NANO_LOCK_WAIT_MS, then exits 5 naming both files) tune it. Processes on two hosts sharing a seed are not covered; give each writer its own NANO_INDEX.
+        description: scripts/client-x402.js holds a per-account lock on this host from the frontier read until the process ends, which is after the fate of its block is read (when the account cannot be read the fate stays unknown and the lock is released all the same, see section 3), so several processes paying from one seed sign one block at a time instead of competing blocks against one frontier. Default on; NANO_LOCK=0 turns it off. NANO_LOCK_DIR (default the system temp dir), NANO_LOCK_WAIT_MS (default 120000, then exit 5 with nothing signed) and NANO_LOCK_MAX_MS (default 180000: a holder whose process is gone is taken over; a live holder that has held the lock this long is never taken over, the waiter exits 5 at once naming the pid, so an operator can look at it; a record with no valid pid, which may be a holder still writing it, is never removed: the waiter polls to NANO_LOCK_WAIT_MS, then exits 5 naming the file for an operator to check and delete by hand; removing a dead holder's record runs under an exclusive `.reaper` file beside the lock, scripts/wallet-lock-reaper.js, so two waiters cannot both reclaim one record, and a `.reaper` file that already exists is never removed or aged out by a waiter: it polls to NANO_LOCK_WAIT_MS, then exits 5 naming both files) tune it. Processes on two hosts sharing a seed are not covered; give each writer its own NANO_INDEX.
       - name: NANO_CAP
         required: false
         description: Cumulative spending cap for scripts/inference-proxy.js in NANO as decimal text, over the life of its state file. The proxy refuses to start without it.
@@ -51,7 +51,7 @@ for where to spend, how to sell and how to get funded. If neither is installed,
 ## 1. A wallet with no node
 
 ```bash
-cd <this skill's folder>/scripts && npm install          # installs nanocurrency, the only dependency
+cd <this skill's folder>/scripts && npm ci --ignore-scripts   # nanocurrency 2.5.0 exactly, from the lockfile shipped beside it
 export NANO_SEED=$(openssl rand -hex 32)                  # once; then keep it in a 600 file, not in a log
 node no-node.js address                                   # your nano_ address (share this)
 node no-node.js status                                    # balance, frontier, unpocketed sends
@@ -141,6 +141,19 @@ the block landed (re-present the same payment, the seller replays the reply), th
 frontier is untouched (nothing moved, the same payment is still good), or the frontier
 moved past the block (it can never land, nothing moved from it, sign anew). A lost reply
 after the payment was sent is resolved the same way, not reported as an error.
+
+There is a fourth outcome, and the lock does not cover it. If the account cannot be read
+either (the lookup host is down, often together with the seller when both are one host),
+the client says it could not tell, prints the block hash, exits 1 and the lock goes with
+the process: nothing on disk remembers that a signed block is still out. The seller can
+broadcast that block until the account's frontier moves. A new block signed meanwhile
+competes with it and only one of the two can land, so the chain never pays both from one
+frontier; but if the first block had already landed, a retry of the same call signs a
+second block on top of it and pays twice. After a "could not read the account" line, look
+the printed hash up before calling again (`node no-node.js status` prints the frontier:
+if it is that hash, the block landed; any Nano explorer shows the same), and tell a
+runtime that retries on exit 1 not to retry this one. Set `NANO_SAVE_PAYLOAD`
+if the call matters: the saved header is what re-presents the first payment.
 
 **NanoGPT's `nano` scheme** (LLM inference, per-payment deposit address): three HTTP
 calls, in `references/buy-from-nanogpt.md`. Send with `no-node.js send`, then call the

@@ -17,6 +17,10 @@ https://pursekeeper.dev/examples/research/2026-11-15-nanogpt-api-host/
 Also since about 2026-11-11: a quote request with `max_tokens` under 16 gets HTTP 400, not 402, and
 one with no `max_tokens` is priced for the model's full output (0.0437 XNO for gpt-4.1-nano), so set it.
 
+What leaves your machine: the quote call in step 1 and the completing call in step 3 both send the whole
+`request.json`, your messages included, to NanoGPT, and step 1 does so before anything is paid. Leave out
+credentials and anything you would not hand to a third party; nothing here redacts it for you.
+
 ## 1. Ask, get a 402 with a price and a deposit address
 
 ```
