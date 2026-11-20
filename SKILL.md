@@ -21,7 +21,7 @@ metadata:
         description: scripts/client-x402.js holds a per-account lock on this host from the frontier read until the process ends, which is after the fate of its block is read (a block whose call was not served is remembered by the NANO_PENDING record, not by the lock), so several processes paying from one seed sign one block at a time instead of competing blocks against one frontier. Default on; NANO_LOCK=0 turns it off. NANO_LOCK_DIR (default the system temp dir), NANO_LOCK_WAIT_MS (default 120000, then exit 5 with nothing signed) and NANO_LOCK_MAX_MS (default 180000: a holder whose process is gone is taken over; a live holder that has held the lock this long is never taken over, the waiter exits 5 at once naming the pid, so an operator can look at it; a record with no valid pid, which may be a holder still writing it, is never removed: the waiter polls to NANO_LOCK_WAIT_MS, then exits 5 naming the file for an operator to check and delete by hand; removing a dead holder's record runs under an exclusive `.reaper` file beside the lock, scripts/wallet-lock-reaper.js, so two waiters cannot both reclaim one record, and a `.reaper` file that already exists is never removed or aged out by a waiter: it polls to NANO_LOCK_WAIT_MS, then exits 5 naming both files) tune it. Processes on two hosts sharing a seed are not covered; give each writer its own NANO_INDEX.
       - name: NANO_PENDING
         required: false
-        description: scripts/client-x402.js writes the hash, predecessor and call (URL, method, SHA-256 of the body; no signature, nothing spendable) of every signed payment to pending-<account>.json before the request is sent, mode 600, and removes the entry when the call is served or the block is proven dead. The next run from that account reads the record before signing and exits 7 with nothing signed if this same call (URL, method, body) was already paid by a block that is on the chain or may be. Default on; NANO_PENDING=0 turns it off. NANO_PENDING_DIR (default ~/.pursekeeper; must survive a restart) says where it lives. NANO_PENDING_ACK=<block hash> pays for an already-paid call again on purpose; NANO_PENDING_HOLD_H (default 24) is how many hours such a payment keeps blocking a repeat of its call.
+        description: scripts/client-x402.js writes the hash, predecessor and call (URL, method, SHA-256 of the body; no signature, nothing spendable) of every signed payment to pending-<account>.json before the request is sent, mode 600, and removes every entry of a block when a call is served on that block or the block is proven dead. The next run from that account reads the record before signing and exits 7 with nothing signed if this same call (URL, method, body) was already paid by a block that is on the chain or may be. Default on; NANO_PENDING=0 turns it off. NANO_PENDING_DIR (default ~/.pursekeeper; must survive a restart) says where it lives. NANO_PENDING_ACK=<block hash> pays for an already-paid call again on purpose and releases that call only; NANO_PENDING_HOLD_H (default 24) is how many hours, counted from the last time the client sent the block for a call, such a payment keeps blocking a repeat of that call.
       - name: NANO_CAP
         required: false
         description: Cumulative spending cap for scripts/inference-proxy.js in NANO as decimal text, over the life of its state file. The proxy refuses to start without it.
@@ -167,21 +167,28 @@ on, and for each entry:
   method, same body, same URL) exits 7 with nothing signed.** Re-present the payment
   that was made (the `NANO_SAVE_PAYLOAD` file holds the header; pursekeeper.dev replays
   the reply for ten minutes) or take the hash to the seller. To pay a second time on
-  purpose, set `NANO_PENDING_ACK=<that hash>`. After 24 hours (`NANO_PENDING_HOLD_H`)
-  the entry moves to `unserved-<account>.jsonl` beside the record, a list of what was
-  paid for and not served, and stops blocking.
+  purpose, set `NANO_PENDING_ACK=<that hash>`; it releases the call it is given on and
+  no other. 24 hours (`NANO_PENDING_HOLD_H`) after the client last sent the block for
+  that call, the entry moves to `unserved-<account>.jsonl` beside the record, a list of
+  what was paid for and not served, and stops blocking. The hold is counted from the
+  sending, not from the landing: a block a seller broadcasts late has less of it left.
 
 If the record cannot be written, the signed request is not sent (exit 7). Tell a runtime
 that retries on a non-zero exit that 7 means "read the line", not "try again". Two things
 to know before sharing one wallet between workers: the URL, method and body are all that
 make two calls "the same", so if ten workers buy the identical call and one reply is lost
 after its payment landed, the workers behind it are refused until someone acknowledges
-that block; and one block offered for two different calls (it can happen only while the
-block has not been broadcast) stands against both until one of them is served on it:
-then the block has bought that call, the other has not been paid for, and its entry is
-dropped with a line on stderr saying so. Not
+that block; and one block can be signed for two different calls (only while it has not
+been broadcast: same predecessor, same quote, so the same hash). Unbroadcast, it blocks
+neither. Once it is on the chain it stands against each of them: each is refused with
+"this call may already be paid", because the block paid for one of them and the client
+cannot know which, until that call is acknowledged or its own entry runs out its hold.
+If one of them is served on the block instead, the block has bought that call, the other
+has not been paid for, and its entry is dropped with a line on stderr saying so. Not
 covered: two hosts sharing one seed, a record someone deleted, `NANO_PENDING=0`, other
-wallet software spending from the same account, and calls that differ only in `HEADERS`.
+wallet software spending from the same account, a block that a seller broadcasts after
+its hold has run out with no run from the account in between, and calls that differ only
+in `HEADERS`.
 One account per writer (`NANO_INDEX`) is still the rule.
 
 **NanoGPT's `nano` scheme** (LLM inference, per-payment deposit address): three HTTP

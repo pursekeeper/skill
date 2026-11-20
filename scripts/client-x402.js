@@ -47,11 +47,11 @@
 // block's hash, its predecessor and the call it pays for (URL, method, SHA-256 of the body; no signature, nothing
 // spendable) are written to <NANO_PENDING_DIR>/pending-<account>.json, mode 600. An entry is removed when its block is
 // proven dead, or when a call is served on its block. A block is one payment: if the same block was also on record
-// for another call (possible only while it had not been broadcast: same predecessor, same quote, so the same hash),
-// the served call is the one it bought, the other call has not been paid for, and its entry goes too, with a stderr
-// line naming it. Keeping it would refuse that call's retry as "already paid", which would be false (ClawHub's scan of
-// 0.3.19 read the earlier wording here as a promise to keep it). Every later run from the same account reads the
-// record under the lock, with the same frontier it is about to sign against, and for each entry:
+// for another call (it can be signed for two calls only while it has not been broadcast: same predecessor, same quote,
+// so the same hash), the served call is the one it bought, the other call has not been paid for, and its entry goes
+// too, with a stderr line naming it. Keeping it would refuse that call's retry as "already paid", which would be false
+// (ClawHub's scan of 0.3.19 read the earlier wording here as a promise to keep it). Every later run from the same
+// account reads the record under the lock, with the same frontier it is about to sign against, and for each entry:
 //   - never broadcast (the frontier is still its predecessor): kept, and signing goes ahead, because the new block
 //     names the same predecessor and a Nano account can confirm only one block per predecessor. Whichever of the two
 //     lands, the other is dead; the two can never both be paid;
@@ -60,13 +60,18 @@
 //     A different call goes ahead: that block can no longer land later, so nothing signed now can be a second payment
 //     for the same thing. This same call (same method, body and URL) is refused with exit 7 and nothing signed:
 //     re-present the payment that was made (the saved PAYMENT-SIGNATURE, or the hash by the seller's own route).
-//     NANO_PENDING_ACK=<hash> pays again on purpose; after NANO_PENDING_HOLD_H hours (default 24) the entry moves to
-//     unserved-<account>.jsonl beside the record (what was paid for and not served on that run) and stops blocking.
+//     NANO_PENDING_ACK=<hash> pays again on purpose and releases this call's entry only; NANO_PENDING_HOLD_H hours
+//     (default 24) after this client last sent the block for that call, the entry moves to unserved-<account>.jsonl
+//     beside the record (what was paid for and not served on that run) and stops blocking. The hold is counted from
+//     the sending, not from the landing: a block a seller broadcasts late has less of its hold left, or none.
+//     If the block is on record for two calls, each is refused on its own entry ("may already be paid": the block paid
+//     for one of them and the client cannot know which), and an entry that outlives the other keeps a note of it.
 // So the same call is not signed twice while an earlier block for it is, or may be, on the chain, short of an
 // acknowledgement by hash or the hold running out; and blocks that were never broadcast are made harmless by sharing
 // the new block's predecessor. Not covered: two hosts sharing one seed (as for the lock), a record that was deleted,
-// NANO_PENDING=0, other wallet software spending from the same account, and a call repeated with different HEADERS
-// (they are not part of what makes two calls the same).
+// NANO_PENDING=0, other wallet software spending from the same account, a block that a seller broadcasts after its
+// hold has run out with no run from this account in between, and a call repeated with different HEADERS (they are not
+// part of what makes two calls the same).
 'use strict';
 const N = require('nanocurrency');
 const { reapDeadHolder } = require('./wallet-lock-reaper');
@@ -271,7 +276,7 @@ async function explainFate(account, hash, previous, lastToken) {
 }
 
 // The unresolved-payment record (see the header). One JSON file per account holding a list of entries
-// {hash, previous, url, signed_url, method, body_sha256, amount_raw, pay_to, signed_at}: no signature and no key, so the
+// {hash, previous, url, signed_url, method, body_sha256, amount_raw, pay_to, signed_at[, also_for]}: no signature and no key, so the
 // file is not spendable; mode 600 in a mode 700 directory because the URLs are the caller's business. Every change is a
 // read-modify-write under an exclusive pending-<account>.json.lock file (held for the few synchronous file calls, no
 // network inside), so two processes that do not share the wallet lock (NANO_LOCK=0, different NANO_LOCK_DIR) cannot
@@ -303,10 +308,19 @@ function updatePending(account, change) {
   }
   try {
     // One entry per block and call. A block signed again on the same frontier for the same quote has the same hash;
-    // the URL is not part of a block, so one block can also have been offered for two different calls, and then it
-    // stands against both until one of them is served on it (settlePending, below) or it is proven dead.
-    const seen = new Set(), key = p => [up(p.hash), p.method, p.body_sha256, p.url, p.signed_url].join(' ');
-    const next = change(readPending(account)).filter(p => !seen.has(key(p)) && seen.add(key(p)));
+    // the URL is not part of a block, so one block can also have been offered for two different calls. While it has
+    // not been broadcast it blocks neither. Once it is on the chain it stands against each of them until that call is
+    // acknowledged or its own entry runs out its hold, or until one of them is served on it (settlePending, below).
+    // The same block sent again for the same call stays one entry and takes the time of the LAST sending: until
+    // 0.3.20 the first signed_at was kept, so a block that was refused, sent again later and landed then could be
+    // "older than the hold" at once, and the next run paid a second time (found by a reviewing agent, 2026-11-19).
+    const at = new Map(), next = [], key = p => [up(p.hash), p.method, p.body_sha256, p.url, p.signed_url].join(' ');
+    for (const p of change(readPending(account))) {
+      const i = at.get(key(p));
+      if (i === undefined) { at.set(key(p), next.length); next.push(p); continue; }
+      const had = Date.parse(next[i].signed_at), now = Date.parse(p.signed_at);
+      if (Number.isFinite(now) && !(had >= now)) next[i] = { ...next[i], signed_at: p.signed_at };
+    }
     if (!next.length) { try { fs.unlinkSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; } return next; }
     try {
       const fd = fs.openSync(tmp, 'w', 0o600);
@@ -323,6 +337,11 @@ const pendingRefuse = (text, tail = ' Nothing signed, nothing sent.') => { conso
 const normUrl = u => { try { const x = new URL(u); x.hash = ''; return x.href; } catch { return String(u); } };
 const sameCall = (p, call) => String(p.method || 'GET').toUpperCase() === call.method && p.body_sha256 === call.body_sha256 &&
   [p.url, p.signed_url].some(u => u && call.urls.includes(normUrl(u)));
+// Two entries of the record are one call when either is the same call as the other (a call recorded once as given and
+// once behind a seller's redirect is two entries and one call).
+const callOf = p => ({ method: String(p.method || 'GET').toUpperCase(), body_sha256: p.body_sha256, urls: [p.url, p.signed_url].filter(Boolean).map(normUrl) });
+const callLabel = p => p.method + ' ' + p.url;
+const alsoFor = p => (Array.isArray(p.also_for) ? p.also_for : []).map(String);
 // Called under the wallet lock with the frontier the new block will be signed against. Exits 7 when this same call
 // must not be signed again; otherwise returns.
 async function reconcilePending(account, frontier, call) {
@@ -337,8 +356,11 @@ async function reconcilePending(account, frontier, call) {
   // block can be on record for two calls, it paid for at most one of them, and until 0.3.20 acknowledging it for one
   // call, or the older entry running out its hold, also removed the other call's entry, whose retry then signed a new
   // block with no warning (found by a reviewing agent on 2026-11-19, reproduced, never seen in use).
+  // An entry that leaves this way is remembered on the entries of the same block that stay, for other calls, as
+  // `also_for`: the block is still one payment for one of those calls, and without the note the entry that stays
+  // would be refused as "this call was already paid" from the next run on, which the client does not know.
   const entryKey = p => [up(p.hash), p.method, p.body_sha256, p.url, p.signed_url].join(' ');
-  const drop = new Set(), gone = new Set(), history = [], refusals = [], says = [];
+  const drop = new Set(), gone = new Set(), left = [], history = [], refusals = [], says = [];
   for (const p of list) {
     const H = up(p.hash), what = 'earlier payment ' + p.hash + ' for ' + p.url;
     const fate = await fateAt(frontier, p.hash, p.previous);
@@ -351,15 +373,17 @@ async function reconcilePending(account, frontier, call) {
     const age = Date.now() - Date.parse(p.signed_at);
     const same = sameCall(p, call), ack = same && acked.has(H);   // an acknowledgement is for the call being made now
     if (ack || (Number.isFinite(age) && age >= HOLD_MS)) {
-      gone.add(entryKey(p)); history.push({ ...p, fate: fate || 'unknown', acknowledged: ack, noted_at: new Date().toISOString() });
+      gone.add(entryKey(p)); left.push(p); history.push({ ...p, fate: fate || 'unknown', acknowledged: ack, noted_at: new Date().toISOString() });
       says.push(what + ' ' + state + (ack ? '; acknowledged with NANO_PENDING_ACK' : '; older than the hold') + ', moved to ' + unservedFile(account));
       continue;
     }
     if (!same) { says.push(what + ' ' + state + ' and that run was not served; it stays on record' + (acked.has(H) ? ' (NANO_PENDING_ACK names its block, but an acknowledgement covers the call being made, and this entry is for another call)' : '')); continue; }
-    // The same block on record for other calls too: it is one payment, so "this call was paid" is not known.
-    const also = list.filter(q => up(q.hash) === H && entryKey(q) !== entryKey(p)).map(q => q.method + ' ' + q.url);
+    // The same block on record for other calls too, now or until an earlier run released them: it is one payment, so
+    // "this call was paid" is not known. Another entry for this same call (as given, and behind a redirect) is not
+    // another call.
+    const also = [...new Set([...list.filter(q => up(q.hash) === H && !sameCall(q, call)).map(callLabel), ...alsoFor(p)])];
     refusals.push(fate === 'landed' && also.length
-      ? 'this call may already be paid. Block ' + p.hash + ' (' + Number(p.amount_raw) / 1e30 + ' NANO to ' + p.pay_to + ', signed ' + p.signed_at + ') is on the chain. It was signed for ' + p.method + ' ' + p.url + ' with this body and is also on record for ' + also.join(' and for ') + '; a block is one payment, so it paid for one of these calls, and none of those runs was served. Re-present it for this call (the same request with the same PAYMENT-SIGNATURE header, or the block hash by whatever route the seller documents). If the seller answers that the block is spent, it bought the other call: then set NANO_PENDING_ACK=' + p.hash + ' to pay for this one. The acknowledgement releases this call only.'
+      ? 'this call may already be paid. Block ' + p.hash + ' (' + Number(p.amount_raw) / 1e30 + ' NANO to ' + p.pay_to + ', signed ' + p.signed_at + ') is on the chain. It was signed for ' + p.method + ' ' + p.url + ' with this body and the same block was also on record for ' + also.join(' and for ') + '; a block is one payment, so it paid for one of these calls, and none of those runs was served on it. Re-present it for this call (the same request with the same PAYMENT-SIGNATURE header, or the block hash by whatever route the seller documents). If the seller answers that the block is spent, it bought the other call: then set NANO_PENDING_ACK=' + p.hash + ' to pay for this one. The acknowledgement releases this call only.'
       : fate === 'landed'
       ? 'this call was already paid. Block ' + p.hash + ' (' + Number(p.amount_raw) / 1e30 + ' NANO to ' + p.pay_to + ', signed ' + p.signed_at + ') is on the chain and paid for ' + p.method + ' ' + p.url + ' with this body, and that run was not served. Re-present that payment instead of signing a new one: send the same request with the same PAYMENT-SIGNATURE header (the file NANO_SAVE_PAYLOAD wrote, if it was set), or give the seller the block hash by whatever route it documents. To pay for the call a second time on purpose, set NANO_PENDING_ACK=' + p.hash + '.'
       : 'this call may already be paid. Block ' + p.hash + ' was signed for ' + p.method + ' ' + p.url + ' with this body on ' + p.signed_at + ', the account has moved on since, and the node could not say whether that block is on the chain. Signing now could pay twice. Retry when the node answers, or look the block up yourself and then set NANO_PENDING_ACK=' + p.hash + '.');
@@ -370,7 +394,10 @@ async function reconcilePending(account, frontier, call) {
       const fd = fs.openSync(unservedFile(account), 'a', 0o600);
       try { for (const h of history) fs.writeSync(fd, JSON.stringify(h) + '\n'); } finally { fs.closeSync(fd); }
     }
-    if (drop.size || gone.size) updatePending(account, cur => cur.filter(p => !drop.has(up(p.hash)) && !gone.has(entryKey(p))));
+    if (drop.size || gone.size) updatePending(account, cur => cur.filter(p => !drop.has(up(p.hash)) && !gone.has(entryKey(p))).map(p => {
+      const more = left.filter(q => up(q.hash) === up(p.hash) && !sameCall(q, callOf(p))).map(callLabel);
+      return more.length ? { ...p, also_for: [...new Set([...alsoFor(p), ...more])] } : p;
+    }));
   } catch (e) { pendingRefuse('the record of unresolved payments at ' + file + ' cannot be updated (' + e.message + ').'); }
   for (const line of says) console.error(line);
   if (refusals.length) pendingRefuse(refusals[0]);
@@ -520,9 +547,9 @@ function savePayload(file, body) {
         // By hash: every entry of this block goes. Dead, because the block can never land for any call. Served, because
         // the one payment this block can make has bought this call, so another call it was offered for is unpaid;
         // that is said out loud, since the earlier run told its caller to re-present this block for that call.
+        // Another entry for this same call (recorded as given, and behind a redirect) is not another call.
         let others = [];
-        const mine = p => p.method === entry.method && p.body_sha256 === entry.body_sha256 && p.url === entry.url && p.signed_url === entry.signed_url;
-        updatePending(account, cur => { others = cur.filter(p => up(p.hash) === up(hash) && !mine(p)); return cur.filter(p => up(p.hash) !== up(hash)); });
+        updatePending(account, cur => { others = cur.filter(p => up(p.hash) === up(hash) && !sameCall(p, call)); return cur.filter(p => up(p.hash) !== up(hash)); });
         if (fate === 'served') for (const p of others)
           console.error('block ' + hash + ' was also on record for ' + p.method + ' ' + p.url + ' (signed ' + p.signed_at + ', not served then). A block is one payment and it has now bought the call just served, so that other call has not been paid for: its entry is dropped, and re-presenting this block for it will not work at a seller that sells one call per block');
       } else console.error('unresolved payment ' + hash + ' recorded in ' + pendingFile(account) + '; the next run from this account settles it before signing for this call again');

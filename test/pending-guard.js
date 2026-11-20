@@ -61,6 +61,7 @@ async function world(t) {
       if (b.error) { res.statusCode = 502; return res.end(JSON.stringify({ error: b.error })); }
       return res.end(JSON.stringify({ found: true, confirmed: b.confirmed === 'true', successor: /^0+$/.test(b.successor) ? null : b.successor }));
     }
+    if (u.pathname === '/alias') { res.writeHead(302, { location: '/thing' + u.search }); return res.end(); }   // a seller's canonical redirect
     const sig = req.headers['payment-signature'];
     if (!sig) {
       const pr = { x402Version: 2, resource: { url: 'http://x/' }, accepts: [{ scheme: 'exact', network: 'nano:mainnet', asset: 'XNO', amount: seller.amount, payTo: PAY_TO, maxTimeoutSeconds: 60, extra: { workOptional: true } }] };
@@ -98,6 +99,7 @@ test('a served call leaves no record', async t => {
   assert.equal(r.code, 0, r.stderr);
   assert.equal(w.record(), null);
   assert.equal(w.seller.paid.length, 1);
+  assert.doesNotMatch(r.stderr, /also on record/, 'its own entry is not another call');
 });
 
 test('the record is on disk when the signed request reaches the seller, and carries nothing spendable', async t => {
@@ -301,7 +303,12 @@ test('an acknowledgement releases the call being made, not another call on recor
   assert.deepEqual(w.unserved().map(u => [u.url.slice(-3), u.acknowledged]), [['q=A', true]]);
   const b2 = await w.run('/thing?q=B');                        // 0.3.19: exit 0 here and a second payment for B
   assert.equal(b2.code, 7, b2.stderr);
-  assert.match(b2.stderr, /this call was already paid/);
+  // A's entry has left, and the client still does not know which of the two calls the block bought (the seller in
+  // this test broadcast it with B's request; one that had kept A's copy and broadcast that would look the same from
+  // here). The first draft of 0.3.20 said "this call was already paid" from this run on.
+  assert.match(b2.stderr, /this call may already be paid[^\n]*also on record for GET [^\n]*q=A/);
+  assert.doesNotMatch(b2.stderr, /this call was already paid/);
+  assert.deepEqual(w.record().map(p => [p.url.slice(-3), p.also_for.map(x => x.slice(-3))]), [['q=B', ['q=A']]]);
   assert.equal(w.seller.paid.length, 4, 'A, B, Z and the acknowledged A; no block was signed for B again');
 });
 
@@ -318,9 +325,104 @@ test('the hold runs out per entry: an older entry of the same block does not tak
   assert.match(b2.stderr, /q=A is on the chain; older than the hold, moved to /);
   assert.deepEqual(w.record().map(p => p.url.slice(-3)), ['q=B'], "B's own hold has not run out");
   assert.deepEqual(w.unserved().map(u => u.url.slice(-3)), ['q=A']);
+  assert.match(b2.stderr, /this call may already be paid[^\n]*also on record for GET [^\n]*q=A/);
   const b3 = await w.run('/thing?q=B');                        // 0.3.19: exit 0 here and a second payment for B
   assert.equal(b3.code, 7, b3.stderr);
+  assert.match(b3.stderr, /this call may already be paid[^\n]*also on record for GET [^\n]*q=A/, 'nothing was learned between the two runs, so the wording does not harden');
+  assert.doesNotMatch(b3.stderr, /this call was already paid/);
   assert.equal(w.seller.paid.length, 2, 'no block was signed for B again');
+});
+
+// Four more from the second review of the draft (2026-11-19). The first is in 0.3.18 and 0.3.19 as released.
+test('the hold is counted from the last sending of a block, not from its first signing', async t => {
+  const w = await world(t); w.seller.mode = 'refuse';
+  await w.run('/thing?q=A');                                   // signed, refused, never broadcast
+  const t0 = w.record()[0].signed_at;
+  await new Promise(s => setTimeout(s, 4000));
+  w.seller.mode = 'drop'; w.seller.onPaid = p => w.land(p);
+  await w.run('/thing?q=A');                                   // the identical block, sent again: it lands now, reply lost
+  assert.equal(w.seller.paid[1].hash, w.seller.paid[0].hash);
+  const rec = w.record();
+  assert.equal(rec.length, 1, 'one entry per block and call');
+  assert.ok(Date.parse(rec[0].signed_at) >= Date.parse(t0) + 3500, 'the entry carries the time of the second sending');
+  w.seller.mode = 'serve';
+  const r3 = await w.run('/thing?q=A', { NANO_PENDING_HOLD_H: String(3 / 3600) });   // 0.3.19: exit 0 here, a second payment under 3 s after the first landed
+  assert.equal(r3.code, 7, r3.stderr);
+  assert.match(r3.stderr, /this call was already paid/);
+  assert.equal(w.seller.paid.length, 2, 'no third block reached the seller');
+  assert.equal(w.node.chain.size, 2, 'one payment on the chain');
+});
+
+test('one call on record twice (as given, and behind a redirect) is one call, not two', async t => {
+  const w = await world(t); w.seller.mode = 'refuse';
+  await w.run('/alias?q=A');                                   // the quote redirects to /thing?q=A; refused, never broadcast
+  w.seller.mode = 'drop'; w.seller.onPaid = p => w.land(p);
+  await w.run('/thing?q=A');                                   // the identical block lands, reply lost
+  assert.equal(w.seller.paid[1].hash, w.seller.paid[0].hash);
+  assert.deepEqual(w.record().map(p => [new URL(p.url).pathname, new URL(p.signed_url).pathname]), [['/alias', '/thing'], ['/thing', '/thing']]);
+  w.seller.mode = 'serve';
+  for (const path of ['/thing?q=A', '/alias?q=A']) {
+    const r = await w.run(path);
+    assert.equal(r.code, 7, r.stderr);
+    assert.match(r.stderr, /this call was already paid/, 'there is no other call the block could have bought');
+    assert.doesNotMatch(r.stderr, /also on record|it bought the other call/);
+  }
+  const ack = await w.run('/thing?q=A', { NANO_PENDING_ACK: w.seller.paid[0].hash });
+  assert.equal(ack.code, 0, ack.stderr);
+  assert.equal(w.record(), null, 'the acknowledgement of a call releases both of its entries');
+  const v = await world(t); v.seller.mode = 'refuse';
+  await v.run('/alias?q=A');
+  v.seller.mode = 'serve'; v.seller.onPaid = p => v.land(p);
+  const s = await v.run('/thing?q=A');                         // the same call, served on the same block
+  assert.equal(s.code, 0, s.stderr);
+  assert.doesNotMatch(s.stderr, /also on record/, 'the call just served is that call');
+  assert.equal(v.record(), null);
+});
+
+test('when the older of two entries for one call runs out its hold, the younger is not told about "another call"', async t => {
+  const w = await world(t); w.seller.mode = 'refuse';
+  await w.run('/alias?q=A');                                   // recorded behind the redirect; refused, never broadcast
+  await new Promise(s => setTimeout(s, 4000));
+  w.seller.mode = 'drop'; w.seller.onPaid = p => w.land(p);
+  await w.run('/thing?q=A');                                   // the identical block lands, reply lost
+  w.seller.mode = 'serve';
+  const r1 = await w.run('/thing?q=A', { NANO_PENDING_HOLD_H: String(2.5 / 3600) });   // the /alias entry is older than 2.5 s
+  assert.equal(r1.code, 7, r1.stderr);
+  assert.match(r1.stderr, /older than the hold, moved to /);
+  assert.deepEqual(w.record().map(p => [new URL(p.url).pathname, p.also_for]), [['/thing', undefined]]);
+  const r2 = await w.run('/thing?q=A');
+  assert.equal(r2.code, 7, r2.stderr);
+  assert.match(r2.stderr, /this call was already paid/);
+  assert.equal(w.seller.paid.length, 2);
+});
+
+test('the same URL with another body on the same block: an acknowledgement for one body keeps the other body\'s entry', async t => {
+  const w = await world(t); w.seller.mode = 'refuse';
+  await w.run('/thing', { METHOD: 'POST', BODY: '{"n":1}' });
+  w.seller.mode = 'drop'; w.seller.onPaid = p => w.land(p);
+  await w.run('/thing', { METHOD: 'POST', BODY: '{"n":2}' });  // the identical block lands for body 2, reply lost
+  const H = w.seller.paid[0].hash;
+  assert.equal(w.seller.paid[1].hash, H);
+  assert.equal(w.record().length, 2);
+  w.seller.mode = 'serve';
+  const a = await w.run('/thing', { METHOD: 'POST', BODY: '{"n":1}', NANO_PENDING_ACK: H });
+  assert.equal(a.code, 0, a.stderr);
+  const b = await w.run('/thing', { METHOD: 'POST', BODY: '{"n":2}' });
+  assert.equal(b.code, 7, b.stderr);
+  assert.match(b.stderr, /this call may already be paid/);
+  assert.equal(w.seller.paid.length, 3, 'body 1, body 2 and the acknowledged body 1; body 2 was not signed again');
+});
+
+test('a block that dies while on record for two calls drops both entries and claims nothing was bought', async t => {
+  const w = await world(t); w.seller.mode = 'refuse';
+  await w.run('/thing?q=A');                                   // A: signed, refused, never broadcast
+  w.seller.onPaid = () => w.moveOn();                          // while the seller holds the same block for B, the account moves
+  const b = await w.run('/thing?q=B');
+  assert.equal(b.code, 1, b.stderr);
+  assert.equal(w.seller.paid[1].hash, w.seller.paid[0].hash);
+  assert.match(b.stderr, /can never land/);
+  assert.doesNotMatch(b.stderr, /also on record|has now bought/);
+  assert.equal(w.record(), null);
 });
 
 test('an older un-broadcast block that lands later still blocks the same call (the list is not one entry deep)', async t => {

@@ -1,4 +1,4 @@
-## 0.3.20 (not released yet: the diff waits for a second agent's review)
+## 0.3.20 (2026-11-20)
 
 `scripts/client-x402.js`, the unresolved-payment record, in the one situation where a block is on record for two different calls. ClawHub's scan of 0.3.19 pointed at it ("a payment-handling flaw that could allow unintended repeat payments": serving one call deletes the record of every other call that shares its block). I checked the finding against the code, reproduced its path, and gave the released code and the finding, without my reading, to a second agent. Both readings agree: the scan is right that my sentences and my code disagreed, wrong about which of the two was at fault, and its remedy would have made the client say something false. The second agent then found two real faults next to it, which the scan had not named.
 
@@ -8,9 +8,17 @@
 - **Fault 1, fixed: an acknowledgement released every call on record for the block.** One block on record for calls A and B; it lands for B and B's reply is lost. A retry of A is refused; the caller does what the refusal says and sets `NANO_PENDING_ACK=<hash>`. Until now that removed B's entry as well, and a retry of B signed a new block with no warning: B paid twice. An acknowledgement now releases the entry of the call being made and no other. Given on a different call it releases nothing, and the client says so.
 - **Fault 2, fixed: the hold ran out per entry but the removal was per block.** When the older entry of such a block passed `NANO_PENDING_HOLD_H`, the younger entry of the other call left the record with it, in the same run that refused that call, and its next retry paid again. Each entry now leaves on its own age.
 - Both faults need one block on record for two calls, the block on the chain and a lost reply. Reproduced offline on 0.3.19; I know of no case in use.
-- The refusal in that situation no longer says "this call was already paid". It says the block is on the chain, names the other call it is on record for, says it paid for one of them, and says what to do if the seller answers that the block is spent.
-- Corrected: the header of `client-x402.js`, the comment in `updatePending`, and the paragraph in SKILL.md.
-- test/pending-guard.js: 24 cases, three new. All three fail on 0.3.19. 109 of 109 in the whole suite.
+- The refusal in that situation no longer says "this call was already paid". It says the block is on the chain, names the other call it was on record for, says it paid for one of them, and says what to do if the seller answers that the block is spent.
+
+I held the release on 2026-11-19 and gave the diff above to a second agent as well. It found one more fault in the released code and three in my fix. All four are fixed here:
+
+- **Fault 3, fixed, in 0.3.18 and 0.3.19 as released: the hold was counted from the first signing of a block.** A block that is refused and never broadcast is signed again, identically, by the next run of the same call. The record kept the first run's time. If the second sending landed and its reply was lost more than `NANO_PENDING_HOLD_H` after the first signing, the entry was "older than the hold" on the very next run, which then signed a new block: one served call, two payments. With the default hold that needs a retry a day or more after a refusal, with no other block on the account in between. The entry now takes the time of the last sending. Reproduced offline on 0.3.19; no case known in use.
+- In my fix: after the other call's entry left the record (by acknowledgement, or its hold), the entry that stayed was refused as "this call was already paid" from the next run on, though nothing had been learned in between. An entry that outlives another call's entry of the same block now carries a note of it (`also_for`) and keeps the "may already be paid" wording.
+- In my fix: a call recorded twice, once as given and once behind the seller's redirect, was described as two different calls ("it bought the other call"). Whether an entry is another call is now decided the way the refusal itself decides it (method, body, and either URL).
+- The tests did not catch three deliberately broken clients the reviewer wrote. They do now, with five more of mine; eight broken variants in all fail the suite.
+- Still not covered, and now said in the header and in SKILL.md: the hold is a timer from the sending, not from the landing. A seller that broadcasts a block after its hold has run out, with no run from the account in between, is not caught by it.
+- Corrected: the header of `client-x402.js`, the comment in `updatePending`, the security note and two paragraphs in SKILL.md.
+- test/pending-guard.js: 29 cases, eight new. Six of the 29 fail on 0.3.19. 114 of 114 in the whole suite.
 
 ## 0.3.19 (2026-11-19)
 
