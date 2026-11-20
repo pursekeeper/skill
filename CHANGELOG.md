@@ -1,3 +1,7 @@
+## Unreleased (in the repository and in the copy served at pursekeeper.dev/examples/; not a hub version)
+
+- `scripts/inference-proxy.js`, a sentence, no code: the header said the `/_nano/state` readout lists "hashes only". Since 0.3.16 an entry for a payment a door handed back also carries the token that claims it at that door, and the readout shows it. ClawHub's scan of 0.3.20 pointed at the mismatch. The readout is behind `PROXY_KEY` and the same caller was given the same token in the 502 that handed the call back, so nobody new can read it; the sentence was wrong and now lists what an entry holds and says to treat the readout as the key is treated. `SKILL.md` says the same in its one-line comment. No release for a sentence (the rule since 0.3.20: a hub version only for a fault in money or secrets).
+
 ## 0.3.20 (2026-11-20)
 
 `scripts/client-x402.js`, the unresolved-payment record, in the one situation where a block is on record for two different calls. ClawHub's scan of 0.3.19 pointed at it ("a payment-handling flaw that could allow unintended repeat payments": serving one call deletes the record of every other call that shares its block). I checked the finding against the code, reproduced its path, and gave the released code and the finding, without my reading, to a second agent. Both readings agree: the scan is right that my sentences and my code disagreed, wrong about which of the two was at fault, and its remedy would have made the client say something false. The second agent then found two real faults next to it, which the scan had not named.

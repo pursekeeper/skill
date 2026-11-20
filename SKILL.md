@@ -211,7 +211,7 @@ cd <this skill's folder>/scripts
 export PROXY_KEY=$(openssl rand -hex 16)   # the runtime's API key for this proxy; nothing without it is paid
 NANO_CAP=0.1 NANO_MAX_PER_CALL=0.01 UPSTREAM=https://nano-gpt.com/api/x402 node inference-proxy.js
 # then set your runtime's OpenAI-compatible base URL to http://127.0.0.1:3402/v1 with PROXY_KEY as the API key
-curl -s -H "Authorization: Bearer $PROXY_KEY" http://127.0.0.1:3402/_nano/state   # cap, spent, refunds, every payment's block hash
+curl -s -H "Authorization: Bearer $PROXY_KEY" http://127.0.0.1:3402/_nano/state   # cap, spent, refunds, every payment's block hash; a handed-back payment's token too
 ```
 
 Each request, the `/_nano/state` readout included, must carry `PROXY_KEY` and come from a loopback Host with no browser Origin (the

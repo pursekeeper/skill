@@ -34,7 +34,9 @@
 // Every request must name a loopback Host (127.0.0.1, localhost, [::1]) and carry no Origin header, so a web page
 // the operator's browser opens cannot reach the wallet by a no-preflight POST or by DNS rebinding (403).
 // Endpoints: ANY /v1/* forwarded and paid; GET /_nano/state (same key) for the cap, spend and payment list
-// (hashes only; the seed never leaves this process; the state file is mode 600). A signed send that did not
+// (per payment: time, amount, pay-to, payment id, block hash, path, door and status, never a signed block; a payment a door
+// handed back also shows the token that claims it at that door, the one the 502 already gave the same caller, so treat
+// the readout as you treat the key. The seed never leaves this process; the state file is mode 600). A signed send that did not
 // land stays counted until a block is confirmed at its height; the proxy publishes a change block there itself. Streaming: stream:true is forwarded; the door's SSE is piped as it
 // arrives (x-payer-stream: passthrough); a JSON answer to a stream request is wrapped as one SSE
 // chunk plus [DONE] carrying the whole message, tool_calls included (x-payer-stream: buffered). Only dependency: nanocurrency (npm i nanocurrency).
